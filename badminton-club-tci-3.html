@@ -1,0 +1,2202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" content="#070d0f"/>
+<title>Badminton Club TCI</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800;900&family=DM+Mono:wght@500&display=swap" rel="stylesheet"/>
+<style>
+html,body,#root{margin:0;padding:0;min-height:100%;background:#070d0f;}
+*{-webkit-tap-highlight-color:transparent;}
+</style>
+</head>
+<body>
+<div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#070d0f;color:#475569;font-family:sans-serif;font-size:16px;flex-direction:column;gap:12px"><div style="font-size:40px">🏸</div><div>Loading Badminton Club TCI...</div></div></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useRef } = React;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  🔥 FIREBASE CONFIG  ← Paste your own values here after setup
+// ─────────────────────────────────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey:            "PASTE_YOUR_apiKey_HERE",
+  authDomain:        "PASTE_YOUR_authDomain_HERE",
+  databaseURL:       "PASTE_YOUR_databaseURL_HERE",
+  projectId:         "PASTE_YOUR_projectId_HERE",
+  storageBucket:     "PASTE_YOUR_storageBucket_HERE",
+  messagingSenderId: "PASTE_YOUR_messagingSenderId_HERE",
+  appId:             "PASTE_YOUR_appId_HERE",
+};
+const DB_PATH = "badminton";
+const CONFIGURED = !FIREBASE_CONFIG.apiKey.includes("PASTE");
+
+// ─── Firebase loader ─────────────────────────────────────────────────────────
+let _fb = null;
+async function getFb() {
+  if (_fb) return _fb;
+  if (!CONFIGURED) return null;
+  try {
+    const firebaseApp = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+    const firebaseDb  = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+    const { initializeApp, getApps } = firebaseApp;
+    const { getDatabase, ref, set, onValue, off } = firebaseDb;
+    const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG);
+    const db  = getDatabase(app);
+    _fb = { db, ref, set, onValue, off };
+    return _fb;
+  } catch(e) { console.error("Firebase init failed:", e); return null; }
+}
+
+async function fbWrite(data) {
+  const fb = await getFb();
+  if (!fb) return;
+  try { await fb.set(fb.ref(fb.db, DB_PATH), JSON.parse(JSON.stringify(data))); }
+  catch(e) { console.error("fbWrite error:", e); }
+}
+
+function fbListen(onChange) {
+  if (!CONFIGURED) return () => {};
+  let dbRef = null;
+  getFb().then(fb => {
+    if (!fb) return;
+    dbRef = fb.ref(fb.db, DB_PATH);
+    fb.onValue(dbRef, snap => { if (snap.exists()) onChange(snap.val()); });
+  });
+  return () => { if (dbRef && _fb) { try { _fb.off(dbRef); } catch {} } };
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const TIMER_OPTIONS = [15, 20, 30];
+const SKILL_LEVELS  = ["Beginner", "Intermediate", "Advanced"];
+const SESSION_TYPES = ["Friendly", "Open", "Tournament"];
+const SKILL_COLOR   = { Beginner: "#4ade80", Intermediate: "#facc15", Advanced: "#f87171" };
+const SKILL_SHORT   = { Beginner: "BEG", Intermediate: "INT", Advanced: "ADV" };
+
+const uid = () => Math.random().toString(36).substr(2,8);
+const now = () => Date.now();
+// elapsed minutes accounting for paused duration and current pause
+const matchMins = m => {
+  if (!m) return 0;
+  const paused = (m.pausedDuration || 0) + (m.pausedAt ? now() - m.pausedAt : 0);
+  return Math.floor((now() - m.startTime - paused) / 60000);
+};
+const matchSecs = m => {
+  if (!m) return 0;
+  const paused = (m.pausedDuration || 0) + (m.pausedAt ? now() - m.pausedAt : 0);
+  return Math.floor((now() - m.startTime - paused) / 1000);
+};
+const mins = ts => Math.floor((now() - ts) / 60000);
+const fmt = ts => new Date(ts).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
+const fmtDate = ts => new Date(ts).toLocaleDateString([], { month:"short", day:"numeric" });
+const fmtElapsed = secs => { const m = Math.floor(secs/60); const s = secs%60; return `${m}:${String(s).padStart(2,"0")}`; };
+
+function timeAgo(ts) {
+  const d = mins(ts);
+  if (d < 1) return "just now";
+  if (d < 60) return `${d}m ago`;
+  return `${Math.floor(d/60)}h ${d%60}m ago`;
+}
+
+// ─── Initial state ────────────────────────────────────────────────────────────
+const INIT = {
+  players: [],          // { id, name, skill, checkedIn, checkInTime, gamesPlayed, wins, losses, hasPaid, amountPaid, sitOutGames }
+  courts: [
+    { id:1, name:"Court 1", match:null },
+    { id:2, name:"Court 2", match:null },
+  ],
+  queue: [],            // [{ id, teamA:[pid,pid], teamB:[pid,pid], startTime, sessionType }]
+  matches: [],          // completed matches
+  session: { type:"Friendly", active: false, startTime: null },
+  tournament: null,     // bracket data
+  tournamentTeams: [],  // { id, name, leaderId, memberIds, color, wins, losses, registered }
+  settings: { gameDuration: 15, sessionFee: 5, adminPin: "1234" },
+};
+
+// ─── Team colors ─────────────────────────────────────────────────────────────
+const TEAM_COLORS = ["#f87171","#fb923c","#facc15","#4ade80","#34d399","#38bdf8","#818cf8","#e879f9","#f472b6","#a78bfa"];
+
+// ─── Bracket generator (team-based) ──────────────────────────────────────────
+function buildTeamBracket(teams) {
+  // shuffle for random seeding
+  const shuffled = [...teams].sort(() => Math.random() - 0.5);
+  const rounds = [];
+  let current = shuffled.map(t => ({ id: t.id, name: t.name, color: t.color }));
+  while (current.length > 1) {
+    const round = [];
+    for (let i = 0; i < current.length - 1; i += 2) {
+      round.push({ id: uid(), teamA: current[i], teamB: current[i+1], winner: null, scoreA:"", scoreB:"" });
+    }
+    if (current.length % 2 !== 0) {
+      round.push({ id: uid(), teamA: current[current.length-1], teamB: null, winner: current[current.length-1], scoreA:"BYE", scoreB:"" });
+    }
+    rounds.push(round);
+    current = round.map(m => m.winner).filter(Boolean);
+    if (current.length <= 1) break;
+  }
+  return { rounds, champion: null };
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [state, setState]     = useState(INIT);
+  const [view, setView]       = useState("checkin"); // checkin|dashboard|players|courts|tournament|leaderboard|setup|admin
+  const [tick, setTick]       = useState(0);
+  const [toast, setToast]     = useState(null);
+  const [modal, setModal]     = useState(null); // { type, data }
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPinInput, setAdminPinInput] = useState("");
+
+  // Dynamic game duration from settings
+  const GAME_DURATION = (state.settings && state.settings.gameDuration) || 15;
+
+  const [syncStatus, setSyncStatus] = useState("idle");
+  const writeTimer = useRef(null);
+  const isRemote   = useRef(false);
+
+  // On mount: load localStorage first, then connect Firebase live listener
+  useEffect(() => {
+    try { const raw = localStorage.getItem("bm2"); if (raw) setState(JSON.parse(raw)); } catch {}
+    if (!CONFIGURED) { setSyncStatus("unconfigured"); return; }
+    const unsub = fbListen(cloudData => {
+      isRemote.current = true;
+      setState(cloudData);
+      try { localStorage.setItem("bm2", JSON.stringify(cloudData)); } catch {}
+      setSyncStatus("saved");
+      setTimeout(() => setSyncStatus("idle"), 2000);
+    });
+    return unsub;
+  }, []);
+
+  // Save to Firebase debounced + always mirror to localStorage
+  useEffect(() => {
+    if (isRemote.current) { isRemote.current = false; return; }
+    try { localStorage.setItem("bm2", JSON.stringify(state)); } catch {}
+    if (!CONFIGURED) return;
+    setSyncStatus("syncing");
+    clearTimeout(writeTimer.current);
+    writeTimer.current = setTimeout(async () => {
+      try { await fbWrite(state); setSyncStatus("saved"); setTimeout(() => setSyncStatus("idle"), 2000); }
+      catch { setSyncStatus("offline"); }
+    }, 800);
+  }, [state]);
+
+  useEffect(() => { const t = setInterval(() => setTick(x=>x+1), 1000); return ()=>clearInterval(t); }, []);
+
+  const update = fn => setState(s => { const ns = structuredClone(s); fn(ns); return ns; });
+
+  let toastTimer;
+  const toast$ = (msg, type="ok") => {
+    setToast({msg,type}); clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>setToast(null), 2800);
+  };
+
+  // ── Player actions ──────────────────────────────────────────────────────────
+  const addPlayer = (name, skill) => {
+    if (!name.trim()) { toast$("Enter a name","err"); return; }
+    update(s => s.players.push({ id:uid(), name:name.trim(), skill, checkedIn:true,
+      checkInTime:now(), gamesPlayed:0, wins:0, losses:0,
+      hasPaid:false, amountPaid:0, sitOutGames:0 }));
+    toast$(`✓ ${name.trim()} checked in`);
+  };
+
+  const toggleCheckIn = id => update(s => {
+    const p = s.players.find(x=>x.id===id);
+    p.checkedIn = !p.checkedIn;
+    if (p.checkedIn) p.checkInTime = now();
+  });
+
+  const removePlayer = id => update(s => { s.players = s.players.filter(x=>x.id!==id); });
+
+  const togglePayment = (id, amount) => update(s => {
+    const p = s.players.find(x=>x.id===id);
+    if (!p) return;
+    p.hasPaid = !p.hasPaid;
+    p.amountPaid = p.hasPaid ? (amount || s.settings.sessionFee || 5) : 0;
+  });
+
+  // ── Court / match actions ───────────────────────────────────────────────────
+  const startMatch = (courtId, teamA, teamB, sessionType, duration) => {
+    update(s => {
+      const c = s.courts.find(x=>x.id===courtId);
+      const dur = duration || (s.settings && s.settings.gameDuration) || 15;
+      c.match = { id:uid(), teamA, teamB, startTime:now(), sessionType, duration: dur,
+        status:"playing", pausedAt:null, pausedDuration:0, liveScoreA:0, liveScoreB:0 };
+    });
+  };
+
+  const pauseMatch = courtId => {
+    update(s => {
+      const m = s.courts.find(x=>x.id===courtId)?.match;
+      if (!m || m.pausedAt) return;
+      m.pausedAt = now();
+      m.status = "paused";
+    });
+    toast$("⏸ Match paused");
+  };
+
+  const resumeMatch = courtId => {
+    update(s => {
+      const m = s.courts.find(x=>x.id===courtId)?.match;
+      if (!m || !m.pausedAt) return;
+      m.pausedDuration = (m.pausedDuration || 0) + (now() - m.pausedAt);
+      m.pausedAt = null;
+      m.status = "playing";
+    });
+    toast$("▶ Match resumed");
+  };
+
+
+  const updateLiveScore = (courtId, side, delta) => {
+    update(s => {
+      const m = s.courts.find(x=>x.id===courtId)?.match;
+      if (!m) return;
+      if (side === "A") m.liveScoreA = Math.max(0, (m.liveScoreA||0) + delta);
+      if (side === "B") m.liveScoreB = Math.max(0, (m.liveScoreB||0) + delta);
+    });
+  };
+
+  const resetLiveScore = (courtId) => {
+    update(s => {
+      const m = s.courts.find(x=>x.id===courtId)?.match;
+      if (!m) return;
+      m.liveScoreA = 0; m.liveScoreB = 0;
+    });
+  };
+
+  const endMatch = (courtId, winnerSide, scoreA, scoreB) => {
+    update(s => {
+      const c = s.courts.find(x=>x.id===courtId);
+      if (!c.match) return;
+      const m = c.match;
+      // if paused, resume first to capture final duration
+      if (m.pausedAt) { m.pausedDuration = (m.pausedDuration||0) + (now()-m.pausedAt); m.pausedAt=null; }
+      const winner = winnerSide === "A" ? m.teamA : m.teamB;
+      const loser  = winnerSide === "A" ? m.teamB : m.teamA;
+      const playedMins = matchMins(m);
+      [...m.teamA, ...m.teamB].forEach(pid => {
+        const p = s.players.find(x=>x.id===pid);
+        if (!p) return;
+        p.gamesPlayed++;
+        if (winner.includes(pid)) p.wins++;
+        else p.losses++;
+      });
+      s.matches.push({ ...m, winner, loser, scoreA, scoreB, endTime:now(), playedMins });
+      c.match = null;
+      // Decrement sitOutGames for all players NOT in this match
+      const playingIds = [...m.teamA, ...m.teamB];
+      s.players.forEach(p => {
+        if (!playingIds.includes(p.id) && p.sitOutGames > 0) p.sitOutGames--;
+      });
+      if (s.queue.length > 0) {
+        const next = s.queue.shift();
+        c.match = { id:uid(), ...next, startTime:now(), status:"playing", pausedAt:null, pausedDuration:0, liveScoreA:0, liveScoreB:0 };
+      }
+    });
+    toast$("✓ Match recorded");
+  };
+
+
+  const skipQueueTurn = (queueIdx) => {
+    update(s => {
+      if (queueIdx < 0 || queueIdx >= s.queue.length) return;
+      const entry = s.queue.splice(queueIdx, 1)[0];
+      entry.skipped = (entry.skipped || 0) + 1;
+      s.queue.push(entry);
+      // Penalty: all players in skipped match sit out 1 extra game
+      const penaltyIds = [...(entry.teamA||[]), ...(entry.teamB||[])];
+      penaltyIds.forEach(pid => {
+        const p = s.players.find(x=>x.id===pid);
+        if (p) p.sitOutGames = Math.max(p.sitOutGames||0, 1);
+      });
+    });
+    toast$("↩ Skipped — moved to back · 1 game sit-out penalty applied");
+  };
+
+  const playerSelfJoinQueue = (playerId) => {
+    // Add solo player to queue as a "waiting" entry to be paired by admin
+    update(s => {
+      const alreadyQueued = s.queue.some(q => q.playerIds && q.playerIds.includes(playerId));
+      if (alreadyQueued) return;
+      s.queue.push({ id: uid(), playerIds: [playerId], solo: true, joinedAt: now(), skipped: 0 });
+    });
+    toast$("✓ You joined the queue!");
+  };
+
+  const playerLeaveQueue = (playerId) => {
+    update(s => {
+      s.queue = s.queue.filter(q => !(q.playerIds && q.playerIds.includes(playerId)));
+    });
+    toast$("Removed from queue");
+  };
+
+  const queueMatch = (teamA, teamB, sessionType) => {
+    update(s => s.queue.push({ teamA, teamB, sessionType }));
+    toast$("Added to queue");
+  };
+
+  // ── Tournament ──────────────────────────────────────────────────────────────
+  const startTournament = () => {
+    const registered = state.tournamentTeams.filter(t=>t.registered);
+    if (registered.length < 2) { toast$("Need at least 2 registered teams","err"); return; }
+    const bracket = buildTeamBracket(registered);
+    update(s => { s.tournament = bracket; s.session.type = "Tournament"; s.session.active = true; s.session.startTime = now(); });
+    setView("tournament");
+    toast$("🏆 Tournament bracket created!");
+  };
+
+  const recordTournamentResult = (roundIdx, matchIdx, winnerSide, sA, sB) => {
+    update(s => {
+      if (!s.tournament) return;
+      const match = s.tournament.rounds[roundIdx][matchIdx];
+      if (match.winner) return; // already decided
+      match.winner = winnerSide === "A" ? match.teamA : match.teamB;
+      if (sA !== undefined) { match.scoreA = sA; match.scoreB = sB; }
+      // update team win/loss
+      const winTeam = s.tournamentTeams.find(t=>t.id===match.winner.id);
+      const loseTeam = s.tournamentTeams.find(t=>t.id===(winnerSide==="A"?match.teamB?.id:match.teamA?.id));
+      if (winTeam)  winTeam.wins  = (winTeam.wins||0)+1;
+      if (loseTeam) loseTeam.losses = (loseTeam.losses||0)+1;
+      // advance winner to next round
+      const allDecided = s.tournament.rounds[roundIdx].every(m=>m.winner);
+      if (allDecided) {
+        const winners = s.tournament.rounds[roundIdx].map(m=>m.winner).filter(Boolean);
+        if (winners.length === 1) {
+          s.tournament.champion = winners[0];
+        } else {
+          const newMatches = [];
+          for (let i = 0; i < winners.length - 1; i += 2) {
+            newMatches.push({ id:uid(), teamA:winners[i], teamB:winners[i+1], winner:null, scoreA:"", scoreB:"" });
+          }
+          if (winners.length % 2 !== 0) {
+            newMatches.push({ id:uid(), teamA:winners[winners.length-1], teamB:null, winner:winners[winners.length-1], scoreA:"BYE", scoreB:"" });
+          }
+          if (newMatches.length > 0 && !s.tournament.rounds[roundIdx+1]) {
+            s.tournament.rounds.push(newMatches);
+          }
+        }
+      } else {
+        // slot winner into next round if it exists
+        if (s.tournament.rounds[roundIdx+1]) {
+          const slot = Math.floor(matchIdx/2);
+          const nr = s.tournament.rounds[roundIdx+1];
+          if (nr[slot]) {
+            if (matchIdx%2===0) nr[slot].teamA = match.winner;
+            else nr[slot].teamB = match.winner;
+          }
+        }
+      }
+    });
+  };
+
+  // ── Tournament team actions ─────────────────────────────────────────────────
+  const addTournamentTeam = (name, leaderId, color) => {
+    if (!name.trim()) { toast$("Enter a team name","err"); return; }
+    update(s => s.tournamentTeams.push({
+      id:uid(), name:name.trim(), leaderId, memberIds:leaderId?[leaderId]:[],
+      color: color||TEAM_COLORS[s.tournamentTeams.length % TEAM_COLORS.length],
+      wins:0, losses:0, registered:false, createdAt:now()
+    }));
+    toast$(`✓ Team "${name.trim()}" created`);
+  };
+
+  const removeTournamentTeam = id => update(s => { s.tournamentTeams = s.tournamentTeams.filter(t=>t.id!==id); });
+
+  const toggleTeamMember = (teamId, playerId) => update(s => {
+    const t = s.tournamentTeams.find(x=>x.id===teamId);
+    if (!t) return;
+    if (t.memberIds.includes(playerId)) t.memberIds = t.memberIds.filter(x=>x!==playerId);
+    else t.memberIds.push(playerId);
+  });
+
+  const toggleTeamRegistered = id => update(s => {
+    const t = s.tournamentTeams.find(x=>x.id===id);
+    if (t) t.registered = !t.registered;
+  });
+
+  const setTeamLeader = (teamId, playerId) => update(s => {
+    const t = s.tournamentTeams.find(x=>x.id===teamId);
+    if (t) { t.leaderId = playerId; if (!t.memberIds.includes(playerId)) t.memberIds.push(playerId); }
+  });
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  const playerById = id => state.players.find(p=>p.id===id);
+  const checkedIn  = state.players.filter(p=>p.checkedIn);
+  const activeCourts = state.courts.filter(c=>c.match).length;
+
+  const roundLabel = (rounds, idx) => {
+    const total = rounds.length;
+    if (idx === total-1) return "Final";
+    if (idx === total-2) return "Semi-Final";
+    if (idx === total-3) return "Quarter-Final";
+    return `Round ${idx+1}`;
+  };
+
+  // ─── VIEWS ──────────────────────────────────────────────────────────────────
+
+  // ── DASHBOARD ───────────────────────────────────────────────────────────────
+  const ViewDashboard = () => (
+    <div className="view">
+      <div className="dash-grid">
+        {/* Stats row */}
+        <div className="stat-row">
+          {[
+            { n: state.players.length,  l:"Players",   c:"#1aff7a" },
+            { n: checkedIn.length,      l:"Checked In", c:"#38bdf8" },
+            { n: activeCourts,          l:"On Court",   c:"#facc15" },
+            { n: state.matches.length,  l:"Matches",    c:"#f472b6" },
+          ].map(s=>(
+            <div key={s.l} className="stat-card">
+              <div className="stat-big" style={{color:s.c}}>{s.n}</div>
+              <div className="stat-lbl">{s.l}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Session type */}
+        <div className="card">
+          <div className="card-title">Session Type</div>
+          <div className="pill-row">
+            {SESSION_TYPES.map(t=>(
+              <button key={t}
+                className={`pill ${state.session.type===t?"pill-active":""}`}
+                onClick={()=>update(s=>{ s.session.type=t; })}>
+                {t==="Friendly"?"🏸":t==="Open"?"🔓":"🏆"} {t}
+              </button>
+            ))}
+          </div>
+          {state.session.type === "Tournament" && (
+            <button className="btn-green mt10" onClick={startTournament}>
+              Generate Bracket →
+            </button>
+          )}
+        </div>
+
+        {/* Courts quick view */}
+        <div className="card">
+          <div className="card-title">Courts</div>
+          {state.courts.map(court=>{
+            const m = court.match;
+            const s = m ? (m.status==="paused"?"paused":matchMins(m)>=GAME_DURATION?"overtime":"playing") : "open";
+            const col = {open:"#1aff7a",playing:"#facc15",overtime:"#f87171",paused:"#a78bfa"}[s];
+            const elapsed = m ? mins(m.startTime) : 0;
+            return (
+              <div key={court.id} className="court-mini" style={{borderColor:col+"44",background:col+"08"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span className="court-mini-name" style={{color:col}}>{court.name}</span>
+                  <span className="badge" style={{background:col,color:"#050d0a"}}>
+                    {s.toUpperCase()}
+                  </span>
+                </div>
+                {m ? (
+                  <div className="court-mini-teams">
+                    <span>{m.teamA.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                    <span className="vs">vs</span>
+                    <span>{m.teamB.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                    <span className="court-timer" style={{color:s==="overtime"?"#f87171":s==="paused"?"#a78bfa":"#94a3b8"}}>
+                      {s==="overtime"?`+${matchMins(m)-GAME_DURATION}m`:s==="paused"?"PAUSED":`${Math.max(0,GAME_DURATION-matchMins(m))}m`}
+                    </span>
+                  </div>
+                ):(
+                  <div style={{fontSize:12,color:"#3a6a4a",marginTop:4}}>No active match</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Queue */}
+        {state.queue.length > 0 && (
+          <div className="card">
+            <div className="card-title">Queue ({state.queue.length})</div>
+            {state.queue.map((q,i)=>(
+              <div key={i} className="queue-mini">
+                <span className="q-num-sm">{i+1}</span>
+                <span>{q.teamA.map(id=>playerById(id)?.name||"?").join("&")} vs {q.teamB.map(id=>playerById(id)?.name||"?").join("&")}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Recent matches */}
+        {state.matches.length > 0 && (
+          <div className="card">
+            <div className="card-title">Recent Matches</div>
+            {[...state.matches].reverse().slice(0,4).map(m=>(
+              <div key={m.id} className="match-mini">
+                <div className="match-teams">
+                  <span className="winner-team">{m.winner.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                  <span className="match-score">{m.scoreA} – {m.scoreB}</span>
+                  <span className="loser-team">{m.loser.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                </div>
+                <div className="match-meta">{fmt(m.startTime)} · {m.sessionType}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ── PLAYERS ──────────────────────────────────────────────────────────────────
+  const ViewPlayers = () => {
+    const [name,  setName]  = useState("");
+    const [skill, setSkill] = useState("Intermediate");
+    return (
+      <div className="view">
+        {/* Add player form */}
+        <div className="card">
+          <div className="card-title">Register Player</div>
+          <input className="txt-input" placeholder="Player name"
+            value={name} onChange={e=>setName(e.target.value)}
+            onKeyDown={e=>{ if(e.key==="Enter"){ addPlayer(name,skill); setName(""); }}}/>
+          <div className="pill-row mt8">
+            {SKILL_LEVELS.map(sl=>(
+              <button key={sl}
+                className={`pill ${skill===sl?"pill-active":""}`}
+                style={skill===sl?{background:SKILL_COLOR[sl],color:"#050d0a",borderColor:SKILL_COLOR[sl]}:{borderColor:SKILL_COLOR[sl]+"44",color:SKILL_COLOR[sl]}}
+                onClick={()=>setSkill(sl)}>{sl}
+              </button>
+            ))}
+          </div>
+          <button className="btn-green mt10"
+            onClick={()=>{ addPlayer(name,skill); setName(""); }}>
+            + Check In Player
+          </button>
+        </div>
+
+        {/* Player list */}
+        <div className="card">
+          <div className="card-title">Players ({state.players.length})</div>
+          {state.players.length === 0 && <div className="empty-hint">No players yet</div>}
+          {state.players.map(p=>(
+            <div key={p.id} className={`player-row-full ${!p.checkedIn?"p-absent":""}`}>
+              <div className="p-avatar" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"55",color:SKILL_COLOR[p.skill]}}>
+                {p.name[0].toUpperCase()}
+              </div>
+              <div className="p-info">
+                <div className="p-name">{p.name}</div>
+                <div className="p-meta">
+                  <span className="skill-tag" style={{color:SKILL_COLOR[p.skill]}}>{SKILL_SHORT[p.skill]}</span>
+                  {p.checkedIn
+                    ? <span className="checkin-time">✓ {fmt(p.checkInTime)}</span>
+                    : <span style={{color:"#f87171",fontSize:11}}>Checked out</span>}
+                  <span style={{color:"#64748b",fontSize:11}}>🏸 {p.gamesPlayed}G · {p.wins}W · {p.losses}L</span>
+                  <span style={{fontSize:11,color:p.hasPaid?"#1aff7a":"#f87171",fontWeight:700}}>{p.hasPaid?"✓ Paid":"Unpaid"}</span>
+                  {p.sitOutGames>0 && <span style={{fontSize:11,color:"#facc15"}}>⚠ Sitting out {p.sitOutGames}g</span>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button className="icon-btn" style={{color:p.checkedIn?"#facc15":"#1aff7a"}}
+                  onClick={()=>toggleCheckIn(p.id)} title={p.checkedIn?"Check out":"Check in"}>
+                  {p.checkedIn?"⏸":"▶"}
+                </button>
+                <button className="icon-btn" style={{color:"#f87171"}}
+                  onClick={()=>removePlayer(p.id)}>✕</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ── COURTS ───────────────────────────────────────────────────────────────────
+  const ViewCourts = () => {
+    const [sel, setSel] = useState({ A:[], B:[] });
+    const [sType, setSType] = useState(state.session.type);
+    const [matchDuration, setMatchDuration] = useState((state.settings && state.settings.gameDuration) || 15);
+    const available = checkedIn.filter(p =>
+      !state.courts.some(c => c.match && [...c.match.teamA,...c.match.teamB].includes(p.id)) &&
+      !state.queue.some(q => [...(q.teamA||[]),...(q.teamB||[])].includes(p.id)) &&
+      !(p.sitOutGames > 0)
+    );
+    // Players sitting out (penalty)
+    const sittingOut = checkedIn.filter(p => p.sitOutGames > 0);
+
+    const toggleSel = (side, pid) => {
+      setSel(s => {
+        const list = s[side];
+        if (list.includes(pid)) return {...s,[side]:list.filter(x=>x!==pid)};
+        if (list.length >= 2) return s;
+        return {...s,[side]:[...list,pid]};
+      });
+    };
+
+    const canAssign = sel.A.length===2 && sel.B.length===2;
+    const freeCourt = state.courts.find(c=>!c.match);
+
+    const assign = () => {
+      if (!canAssign) { toast$("Select 2 players per team","err"); return; }
+      if (freeCourt) { startMatch(freeCourt.id, sel.A, sel.B, sType, matchDuration); setSel({A:[],B:[]}); toast$(`🏸 Match started on ${freeCourt.name}`); }
+      else { queueMatch(sel.A, sel.B, sType); setSel({A:[],B:[]}); }
+    };
+
+    return (
+      <div className="view">
+        {/* Active courts */}
+        {state.courts.map(court=>{
+          const m = court.match;
+          if (!m) return (
+            <div key={court.id} className="card court-open-card">
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span className="court-label" style={{color:"#1aff7a"}}>{court.name}</span>
+                <span className="badge" style={{background:"#1aff7a",color:"#050d0a"}}>OPEN</span>
+              </div>
+              <div style={{color:"#1a4a2a",fontSize:12,marginTop:6}}>Waiting for match assignment</div>
+            </div>
+          );
+          const isPaused = m.status === "paused";
+          const mDur = m.duration || GAME_DURATION;
+          const s = isPaused ? "paused" : (matchMins(m)>=mDur?"overtime":"playing");
+          const col = {paused:"#a78bfa",playing:"#facc15",overtime:"#f87171"}[s];
+          const elapsed = matchMins(m);
+          const elapsedSecs = matchSecs(m);
+          const remaining = Math.max(0, mDur - elapsed);
+          const remainSecs = Math.max(0, mDur*60 - elapsedSecs);
+          const statusLabel = {paused:"PAUSED",playing:"IN GAME",overtime:"OVERTIME"}[s];
+          return (
+            <div key={court.id} className="card" style={{borderColor:col+"44"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  <span className="court-label" style={{color:col}}>{court.name}</span>
+                  <span className="badge" style={{background:col,color:"#050d0a",animation:s==="overtime"?"blink 1s infinite":"none"}}>
+                    {statusLabel}
+                  </span>
+                  <span className="badge" style={{background:"#1e293b",color:"#94a3b8"}}>{m.sessionType}</span>
+                </div>
+                {/* Live timer */}
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:28,fontWeight:900,color:s==="overtime"?"#f87171":s==="paused"?"#a78bfa":"#e2e8f0",lineHeight:1,fontFamily:"'DM Mono',monospace"}}>
+                    {s==="overtime"
+                      ? `+${elapsed-mDur}m`
+                      : fmtElapsed(remainSecs)}
+                  </div>
+                  <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginTop:2}}>
+                    {s==="overtime"?"over time":s==="paused"?"paused":"remaining"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="vs-layout">
+                <div className="team-col">
+                  {m.teamA.map(pid=>{const p=playerById(pid); return p?(
+                    <div key={pid} className="player-mini">
+                      <div className="av-sm" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"44",color:SKILL_COLOR[p.skill]}}>{p.name[0]}</div>
+                      <div>
+                        <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                        <div style={{fontSize:10,color:SKILL_COLOR[p.skill]}}>{SKILL_SHORT[p.skill]}</div>
+                      </div>
+                    </div>
+                  ):null;})}
+                </div>
+                <div className="vs-badge">VS</div>
+                <div className="team-col">
+                  {m.teamB.map(pid=>{const p=playerById(pid); return p?(
+                    <div key={pid} className="player-mini">
+                      <div className="av-sm" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"44",color:SKILL_COLOR[p.skill]}}>{p.name[0]}</div>
+                      <div>
+                        <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                        <div style={{fontSize:10,color:SKILL_COLOR[p.skill]}}>{SKILL_SHORT[p.skill]}</div>
+                      </div>
+                    </div>
+                  ):null;})}
+                </div>
+              </div>
+
+              <div style={{fontSize:11,color:"#475569",margin:"8px 0 12px"}}>
+                Started {fmt(m.startTime)} · {elapsed}m played
+                {isPaused && <span style={{color:"#a78bfa",marginLeft:6}}>· Timer paused</span>}
+              </div>
+
+              {/* ── LIVE SCOREBOARD ── */}
+              <div style={{background:"#070d0f",border:"1.5px solid #1a2f3a",borderRadius:14,padding:"14px 10px",marginBottom:12}}>
+                <div style={{fontSize:9,letterSpacing:3,color:"#475569",textTransform:"uppercase",textAlign:"center",marginBottom:10,fontWeight:700}}>
+                  Live Score · First to 21
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"center"}}>
+                  {/* Team A */}
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {m.teamA.map(id=>playerById(id)?.name||"?").join(" & ")}
+                    </div>
+                    <div style={{fontSize:52,fontWeight:900,lineHeight:1,color:(m.liveScoreA||0)>=21?"#1aff7a":"#e2e8f0",
+                      textShadow:(m.liveScoreA||0)>=21?"0 0 20px #1aff7a66":"none",
+                      fontFamily:"'DM Mono',monospace"}}>
+                      {m.liveScoreA||0}
+                    </div>
+                    <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:10}}>
+                      <button onClick={()=>updateLiveScore(court.id,"A",-1)}
+                        style={{width:44,height:44,borderRadius:10,background:"#1a2f3a",border:"1px solid #334155",
+                          color:"#f87171",fontSize:22,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+                      <button onClick={()=>updateLiveScore(court.id,"A",1)}
+                        style={{width:44,height:44,borderRadius:10,background:"#1aff7a22",border:"1.5px solid #1aff7a44",
+                          color:"#1aff7a",fontSize:22,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+                    </div>
+                  </div>
+                  {/* VS divider */}
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+                    <div style={{fontSize:12,fontWeight:900,color:"#334155",letterSpacing:2}}>VS</div>
+                    <button onClick={()=>resetLiveScore(court.id)}
+                      style={{width:32,height:32,borderRadius:8,background:"#1a2f3a",border:"1px solid #334155",
+                        color:"#475569",fontSize:10,fontWeight:700,letterSpacing:1,display:"flex",
+                        alignItems:"center",justifyContent:"center"}} title="Reset score">↺</button>
+                  </div>
+                  {/* Team B */}
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {m.teamB.map(id=>playerById(id)?.name||"?").join(" & ")}
+                    </div>
+                    <div style={{fontSize:52,fontWeight:900,lineHeight:1,color:(m.liveScoreB||0)>=21?"#1aff7a":"#e2e8f0",
+                      textShadow:(m.liveScoreB||0)>=21?"0 0 20px #1aff7a66":"none",
+                      fontFamily:"'DM Mono',monospace"}}>
+                      {m.liveScoreB||0}
+                    </div>
+                    <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:10}}>
+                      <button onClick={()=>updateLiveScore(court.id,"B",-1)}
+                        style={{width:44,height:44,borderRadius:10,background:"#1a2f3a",border:"1px solid #334155",
+                          color:"#f87171",fontSize:22,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+                      <button onClick={()=>updateLiveScore(court.id,"B",1)}
+                        style={{width:44,height:44,borderRadius:10,background:"#1aff7a22",border:"1.5px solid #1aff7a44",
+                          color:"#1aff7a",fontSize:22,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+                    </div>
+                  </div>
+                </div>
+                {/* Winner celebration */}
+                {((m.liveScoreA||0)>=21 || (m.liveScoreB||0)>=21) && (
+                  <div style={{marginTop:12,padding:"10px",background:"#1aff7a12",border:"1px solid #1aff7a30",
+                    borderRadius:10,textAlign:"center",fontSize:13,fontWeight:800,color:"#1aff7a",letterSpacing:1}}>
+                    🏆 {(m.liveScoreA||0)>=(m.liveScoreB||0)
+                      ? m.teamA.map(id=>playerById(id)?.name||"?").join(" & ")
+                      : m.teamB.map(id=>playerById(id)?.name||"?").join(" & ")} wins!
+                  </div>
+                )}
+              </div>
+
+              {/* ── Control buttons ── */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                {/* Pause / Resume */}
+                {isPaused ? (
+                  <button
+                    onClick={()=>resumeMatch(court.id)}
+                    style={{minHeight:52,background:"#a78bfa22",border:"1.5px solid #a78bfa88",borderRadius:12,
+                      color:"#a78bfa",fontFamily:"inherit",fontWeight:800,fontSize:13,letterSpacing:2,
+                      display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                    ▶ Resume
+                  </button>
+                ) : (
+                  <button
+                    onClick={()=>pauseMatch(court.id)}
+                    style={{minHeight:52,background:"#facc1510",border:"1.5px solid #facc1544",borderRadius:12,
+                      color:"#facc15",fontFamily:"inherit",fontWeight:800,fontSize:13,letterSpacing:2,
+                      display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                    ⏸ Pause
+                  </button>
+                )}
+                {/* Record Result */}
+                <button
+                  onClick={()=>setModal({type:"endMatch",courtId:court.id,match:m})}
+                  style={{minHeight:52,background:"#f8717110",border:"1.5px solid #f8717144",borderRadius:12,
+                    color:"#f87171",fontFamily:"inherit",fontWeight:800,fontSize:13,letterSpacing:2,
+                    display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                  ⏹ End Game
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Assign new match */}
+        <div className="card">
+          <div className="card-title">Assign Match</div>
+          <div className="pill-row mb10">
+            {SESSION_TYPES.map(t=>(
+              <button key={t} className={`pill ${sType===t?"pill-active":""}`} onClick={()=>setSType(t)}>
+                {t}
+              </button>
+            ))}
+          </div>
+
+          {/* Timer picker */}
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:6,fontWeight:700}}>⏱ Game Timer</div>
+            <div className="pill-row">
+              {TIMER_OPTIONS.map(t=>(
+                <button key={t} className={`pill ${matchDuration===t?"pill-active":""}`} onClick={()=>setMatchDuration(t)}>
+                  {t} min
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Sitting-out players */}
+          {sittingOut.length > 0 && (
+            <div style={{background:"#facc1508",border:"1px solid #facc1530",borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+              <div style={{fontSize:11,color:"#facc15",letterSpacing:2,textTransform:"uppercase",fontWeight:700,marginBottom:6}}>⚠ Sitting Out (Penalty)</div>
+              {sittingOut.map(p=>(
+                <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 0",borderBottom:"1px solid #1a2f3a"}}>
+                  <span style={{fontWeight:700,fontSize:13,color:"#e2e8f0"}}>{p.name}</span>
+                  <span style={{fontSize:11,color:"#facc15"}}>{p.sitOutGames} game{p.sitOutGames>1?"s":""} remaining</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {available.length < 4 && (
+            <div className="warn-box">Need at least 4 available checked-in players</div>
+          )}
+
+          <div className="team-assign-grid">
+            {["A","B"].map(side=>(
+              <div key={side} className="team-assign-col">
+                <div className="team-assign-header">
+                  Team {side}
+                  <span style={{fontSize:11,color:"#475569"}}>{sel[side].length}/2</span>
+                </div>
+                {available.map(p=>(
+                  <button key={p.id}
+                    className={`player-select-btn ${sel[side].includes(p.id)?"selected":""}
+                      ${(sel[side].length===2 && !sel[side].includes(p.id)) || Object.values(sel).flat().filter(x=>x!==undefined).includes(p.id) && !sel[side].includes(p.id)?"disabled":""}`}
+                    style={sel[side].includes(p.id)?{borderColor:SKILL_COLOR[p.skill],background:SKILL_COLOR[p.skill]+"18"}:{}}
+                    onClick={()=>{
+                      const otherSide = side==="A"?"B":"A";
+                      if (sel[otherSide].includes(p.id)) return;
+                      toggleSel(side,p.id);
+                    }}>
+                    <span className="av-xs" style={{background:SKILL_COLOR[p.skill]+"22",color:SKILL_COLOR[p.skill]}}>{p.name[0]}</span>
+                    <span style={{flex:1,textAlign:"left",fontSize:14,fontWeight:600}}>{p.name}</span>
+                    <span style={{fontSize:10,color:SKILL_COLOR[p.skill]}}>{SKILL_SHORT[p.skill]}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          <button className={`btn-green mt12 ${!canAssign?"btn-disabled":""}`} onClick={assign}>
+            {freeCourt ? `▶ Start on ${freeCourt.name}` : "➕ Add to Queue"}
+          </button>
+        </div>
+
+        {/* Queue */}
+        {state.queue.length > 0 && (
+          <div className="card">
+            <div className="card-title">Queue · ~{state.queue.length * GAME_DURATION}min wait</div>
+            {state.queue.map((q,i)=>(
+              <div key={i} className="queue-row-full">
+                <span className="q-num">{i+1}</span>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:14}}>{(q.teamA||[]).map(id=>playerById(id)?.name||"?").join(" & ")} <span style={{color:"#475569"}}>vs</span> {(q.teamB||[]).map(id=>playerById(id)?.name||"?").join(" & ")}</div>
+                  <div style={{fontSize:11,color:"#475569"}}>{q.sessionType}{q.skipped>0&&<span style={{color:"#facc15",marginLeft:6}}>↩ skipped ×{q.skipped}</span>}</div>
+                </div>
+                <button className="icon-btn" style={{color:"#facc15",fontSize:11,padding:"4px 8px",border:"1px solid #facc1544",borderRadius:8,marginRight:4}}
+                  onClick={()=>skipQueueTurn(i)} title="Skip — penalty: sit out 1 game">↩ Skip</button>
+                <button className="icon-btn" style={{color:"#f87171"}}
+                  onClick={()=>update(s=>{ s.queue.splice(i,1); })}>✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── TOURNAMENT ───────────────────────────────────────────────────────────────
+  const ViewTournament = () => {
+    const [subView, setSubView]   = useState("teams"); // teams | bracket
+    const [teamName, setTeamName] = useState("");
+    const [leaderId, setLeaderId] = useState("");
+    const [teamColor, setTeamColor] = useState(TEAM_COLORS[0]);
+    const [expandedTeam, setExpandedTeam] = useState(null);
+    const [scoreModal, setScoreModal]     = useState(null); // {roundIdx,matchIdx}
+    const [sA, setSA] = useState("21");
+    const [sB, setSB] = useState("15");
+
+    const t = state.tournament;
+    const teams = state.tournamentTeams;
+    const registered = teams.filter(t=>t.registered);
+    const unassigned = state.players.filter(p =>
+      !teams.some(t => t.memberIds.includes(p.id))
+    );
+
+    const teamById = id => teams.find(t=>t.id===id);
+
+    return (
+      <div className="view">
+
+        {/* Sub-nav */}
+        <div style={{display:"flex",background:"#0d1a20",borderRadius:12,padding:3,border:"1px solid #1a2f3a",gap:3}}>
+          {[{id:"teams",icon:"👥",label:"Teams"},{id:"bracket",icon:"🏆",label:"Bracket"}].map(s=>(
+            <button key={s.id} onClick={()=>setSubView(s.id)} style={{
+              flex:1, minHeight:42, borderRadius:9,
+              background:subView===s.id?"#38bdf8":"transparent",
+              color:subView===s.id?"#070d0f":"#475569",
+              fontWeight:800, fontSize:13, letterSpacing:1,
+              display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+            }}>{s.icon} {s.label}</button>
+          ))}
+        </div>
+
+        {/* ── TEAMS TAB ── */}
+        {subView === "teams" && (<>
+
+          {/* Create team */}
+          <div className="card">
+            <div className="card-title">Create Team</div>
+
+            <input className="txt-input" placeholder="Team name (e.g. Thunder Hawks)"
+              value={teamName} onChange={e=>setTeamName(e.target.value)}
+              onKeyDown={e=>e.key==="Enter" && (addTournamentTeam(teamName,leaderId||null,teamColor), setTeamName(""), setLeaderId(""))}
+            />
+
+            {/* Team leader selector */}
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:10,color:"#475569",letterSpacing:3,textTransform:"uppercase",fontWeight:700,marginBottom:6}}>Team Leader (optional)</div>
+              <select className="txt-input" value={leaderId} onChange={e=>setLeaderId(e.target.value)}
+                style={{color:leaderId?"#e2e8f0":"#1e3a4a"}}>
+                <option value="">— Select a player —</option>
+                {state.players.map(p=>(
+                  <option key={p.id} value={p.id}>{p.name} ({p.skill})</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Color picker */}
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:10,color:"#475569",letterSpacing:3,textTransform:"uppercase",fontWeight:700,marginBottom:8}}>Team Colour</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                {TEAM_COLORS.map(c=>(
+                  <button key={c} onClick={()=>setTeamColor(c)} style={{
+                    width:32,height:32,borderRadius:"50%",background:c,
+                    border:`3px solid ${teamColor===c?"#fff":"transparent"}`,
+                    boxShadow:teamColor===c?`0 0 0 2px ${c}`:"none",
+                  }}/>
+                ))}
+              </div>
+            </div>
+
+            <button className="btn-green mt10"
+              onClick={()=>{ addTournamentTeam(teamName,leaderId||null,teamColor); setTeamName(""); setLeaderId(""); }}>
+              + Create Team
+            </button>
+          </div>
+
+          {/* Unassigned players warning */}
+          {unassigned.length > 0 && (
+            <div className="warn-box" style={{borderColor:"#38bdf844",background:"#38bdf808",color:"#38bdf8"}}>
+              📋 {unassigned.length} player{unassigned.length!==1?"s":""} not yet assigned to a team:&nbsp;
+              {unassigned.map(p=>p.name).join(", ")}
+            </div>
+          )}
+
+          {/* Team list */}
+          {teams.length === 0 && <div className="empty-hint">No teams yet — create one above</div>}
+
+          {teams.map(team => {
+            const leader = team.leaderId ? state.players.find(p=>p.id===team.leaderId) : null;
+            const members = team.memberIds.map(id=>state.players.find(p=>p.id===id)).filter(Boolean);
+            const isExpanded = expandedTeam === team.id;
+
+            return (
+              <div key={team.id} className="card" style={{borderColor:team.color+"44",padding:0,overflow:"hidden"}}>
+                {/* Team header */}
+                <div style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",
+                  background:team.color+"08",borderBottom:isExpanded?"1px solid "+team.color+"22":"none"}}>
+                  {/* Color dot */}
+                  <div style={{width:40,height:40,borderRadius:12,background:team.color+"22",
+                    border:"2px solid "+team.color,display:"flex",alignItems:"center",
+                    justifyContent:"center",fontSize:18,fontWeight:900,color:team.color,flexShrink:0}}>
+                    {team.name[0].toUpperCase()}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:800,fontSize:16,color:team.color}}>{team.name}</div>
+                    <div style={{fontSize:11,color:"#475569",marginTop:2}}>
+                      {leader ? `👑 ${leader.name}` : "No leader"} · {members.length} player{members.length!==1?"s":""}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+                    {/* Registered badge */}
+                    <button onClick={()=>toggleTeamRegistered(team.id)} style={{
+                      padding:"5px 10px",borderRadius:100,border:"1.5px solid",
+                      fontSize:10,fontWeight:800,letterSpacing:1,textTransform:"uppercase",
+                      background:team.registered?team.color+"22":"transparent",
+                      borderColor:team.registered?team.color:"#1a2f3a",
+                      color:team.registered?team.color:"#475569",
+                    }}>{team.registered?"✓ IN":"+ REG"}</button>
+                    <button onClick={()=>setExpandedTeam(isExpanded?null:team.id)} className="icon-btn"
+                      style={{color:"#475569",fontSize:16}}>{isExpanded?"▲":"▼"}</button>
+                    <button onClick={()=>removeTournamentTeam(team.id)} className="icon-btn"
+                      style={{color:"#f87171"}}>✕</button>
+                  </div>
+                </div>
+
+                {/* Expanded: manage members */}
+                {isExpanded && (
+                  <div style={{padding:"14px 16px"}}>
+                    <div style={{fontSize:10,color:"#475569",letterSpacing:3,textTransform:"uppercase",fontWeight:700,marginBottom:10}}>
+                      Players — tap to add/remove
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      {state.players.map(p => {
+                        const isMember = team.memberIds.includes(p.id);
+                        const isLeader = team.leaderId === p.id;
+                        const inOtherTeam = !isMember && teams.some(t=>t.id!==team.id && t.memberIds.includes(p.id));
+                        return (
+                          <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,
+                            padding:"8px 10px",borderRadius:10,
+                            background:isMember?team.color+"12":"#0f1f28",
+                            border:"1.5px solid "+(isMember?team.color+"44":"#1a2f3a"),
+                            opacity:inOtherTeam?0.35:1}}>
+                            <div className="av-xs" style={{background:SKILL_COLOR[p.skill]+"22",color:SKILL_COLOR[p.skill]}}>{p.name[0]}</div>
+                            <div style={{flex:1}}>
+                              <div style={{fontWeight:700,fontSize:14}}>{p.name}
+                                {isLeader && <span style={{marginLeft:6,fontSize:10,color:"#facc15"}}>👑 Leader</span>}
+                                {inOtherTeam && <span style={{marginLeft:6,fontSize:10,color:"#f87171"}}>Other team</span>}
+                              </div>
+                              <div style={{fontSize:10,color:SKILL_COLOR[p.skill]}}>{p.skill}</div>
+                            </div>
+                            <div style={{display:"flex",gap:6}}>
+                              {isMember && !isLeader && (
+                                <button onClick={()=>setTeamLeader(team.id,p.id)}
+                                  style={{padding:"4px 8px",borderRadius:6,background:"#facc1518",
+                                    border:"1px solid #facc1544",color:"#facc15",fontSize:10,fontWeight:800}}>
+                                  👑 Lead
+                                </button>
+                              )}
+                              {!inOtherTeam && (
+                                <button onClick={()=>toggleTeamMember(team.id,p.id)}
+                                  className="icon-btn"
+                                  style={{color:isMember?"#f87171":"#1aff7a",background:isMember?"#f8717118":"#1aff7a18"}}>
+                                  {isMember?"−":"+"}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Start tournament CTA */}
+          {registered.length >= 2 && !t && (
+            <button className="btn-green" style={{background:"linear-gradient(135deg,#facc15,#f59e0b)",color:"#070d0f"}}
+              onClick={startTournament}>
+              🏆 Generate Bracket ({registered.length} Teams)
+            </button>
+          )}
+          {registered.length < 2 && teams.length > 0 && (
+            <div className="warn-box">Register at least 2 teams to generate the bracket</div>
+          )}
+        </>)}
+
+        {/* ── BRACKET TAB ── */}
+        {subView === "bracket" && (<>
+          {!t ? (
+            <div className="card" style={{textAlign:"center",padding:"40px 20px"}}>
+              <div style={{fontSize:48,marginBottom:16}}>🏆</div>
+              <div style={{fontSize:18,fontWeight:800,marginBottom:8}}>No Bracket Yet</div>
+              <div style={{fontSize:13,color:"#475569",marginBottom:20}}>
+                Register your teams first, then generate the bracket.
+              </div>
+              <button className="btn-green" onClick={()=>setSubView("teams")}>← Manage Teams</button>
+            </div>
+          ) : (<>
+
+            {/* Champion banner */}
+            {t.champion && (
+              <div className="card champion-card" style={{borderColor:(teamById(t.champion.id)?.color||"#facc15")+"55"}}>
+                <div style={{fontSize:44,marginBottom:8}}>🏆</div>
+                <div style={{fontSize:10,letterSpacing:4,color:"#facc15",textTransform:"uppercase",marginBottom:6}}>Tournament Champion</div>
+                <div style={{fontSize:26,fontWeight:900,color:teamById(t.champion.id)?.color||"#facc15"}}>
+                  {t.champion.name}
+                </div>
+                {(() => {
+                  const ct = teamById(t.champion.id);
+                  const leader = ct?.leaderId ? state.players.find(p=>p.id===ct.leaderId) : null;
+                  const members = ct?.memberIds.map(id=>state.players.find(p=>p.id===id)).filter(Boolean)||[];
+                  return leader || members.length ? (
+                    <div style={{marginTop:10,fontSize:12,color:"#94a3b8"}}>
+                      {leader && <span>👑 {leader.name} &nbsp;</span>}
+                      {members.filter(m=>m.id!==ct?.leaderId).map(m=>m.name).join(", ")}
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+            )}
+
+            {/* Rounds */}
+            {t.rounds.map((round, ri)=>(
+              <div key={ri} className="card">
+                <div className="card-title">{roundLabel(t.rounds, ri)}</div>
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  {round.map((match, mi)=>{
+                    const tcA = teamById(match.teamA?.id);
+                    const tcB = match.teamB ? teamById(match.teamB.id) : null;
+                    const isBye = match.teamB === null;
+
+                    return (
+                      <div key={match.id} className="bracket-match">
+
+                        {/* Team A */}
+                        <div className={`bracket-team ${match.winner?.id===match.teamA?.id?"bracket-winner":""} ${isBye?"bracket-bye":""}`}
+                          style={match.winner?.id===match.teamA?.id?{borderColor:(tcA?.color||"#facc15"),background:(tcA?.color||"#facc15")+"10"}:{}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+                            {tcA && <div style={{width:24,height:24,borderRadius:6,background:tcA.color+"22",border:"1.5px solid "+tcA.color,
+                              display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:900,color:tcA.color,flexShrink:0}}>
+                              {tcA.name[0]}
+                            </div>}
+                            <span style={{fontWeight:700,fontSize:15}}>{match.teamA?.name||"TBD"}</span>
+                            {(() => { const tl=teamById(match.teamA?.id); const lead=tl?.leaderId?state.players.find(p=>p.id===tl.leaderId):null;
+                              return lead?<span style={{fontSize:10,color:"#facc15"}}>· 👑{lead.name}</span>:null; })()}
+                          </div>
+                          {match.winner?.id===match.teamA?.id && <span style={{fontSize:18}}>👑</span>}
+                          {match.scoreA && <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:900,
+                            color:match.winner?.id===match.teamA?.id?"#1aff7a":"#475569",marginLeft:8}}>{match.scoreA}</span>}
+                        </div>
+
+                        <div className="bracket-vs">{isBye ? "BYE" : "VS"}</div>
+
+                        {/* Team B */}
+                        {!isBye && (
+                          <div className={`bracket-team ${match.winner?.id===match.teamB?.id?"bracket-winner":""}`}
+                            style={match.winner?.id===match.teamB?.id?{borderColor:(tcB?.color||"#facc15"),background:(tcB?.color||"#facc15")+"10"}:{}}>
+                            <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+                              {tcB && <div style={{width:24,height:24,borderRadius:6,background:tcB.color+"22",border:"1.5px solid "+tcB.color,
+                                display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:900,color:tcB.color,flexShrink:0}}>
+                                {tcB.name[0]}
+                              </div>}
+                              <span style={{fontWeight:700,fontSize:15}}>{match.teamB?.name||"TBD"}</span>
+                              {(() => { const tl=teamById(match.teamB?.id); const lead=tl?.leaderId?state.players.find(p=>p.id===tl.leaderId):null;
+                                return lead?<span style={{fontSize:10,color:"#facc15"}}>· 👑{lead.name}</span>:null; })()}
+                            </div>
+                            {match.winner?.id===match.teamB?.id && <span style={{fontSize:18}}>👑</span>}
+                            {match.scoreB && <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:900,
+                              color:match.winner?.id===match.teamB?.id?"#1aff7a":"#475569",marginLeft:8}}>{match.scoreB}</span>}
+                          </div>
+                        )}
+
+                        {/* Record result button */}
+                        {!match.winner && !isBye && (
+                          <button onClick={()=>{ setScoreModal({roundIdx:ri,matchIdx:mi,match}); setSA("21"); setSB("15"); }}
+                            style={{padding:"8px",background:"#1e293b",border:"1px solid #334155",borderRadius:8,
+                              color:"#94a3b8",fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase"}}>
+                            Record Result
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            <button className="btn-outline mt4" style={{borderColor:"#f87171",color:"#f87171"}}
+              onClick={()=>{ update(s=>{ s.tournament=null; }); }}>
+              Reset Bracket
+            </button>
+          </>)}
+        </>)}
+
+        {/* Score entry modal */}
+        {scoreModal && (
+          <div className="overlay">
+            <div className="sheet">
+              <div className="sheet-handle"/>
+              <div className="sheet-title">Record Match Result</div>
+              <div style={{fontSize:11,color:"#475569",textAlign:"center",marginBottom:16,letterSpacing:1}}>
+                {roundLabel(t?.rounds||[], scoreModal.roundIdx).toUpperCase()}
+              </div>
+              <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
+                <div style={{flex:1,textAlign:"center"}}>
+                  {(() => { const tc=teamById(scoreModal.match.teamA?.id); return (
+                    <div style={{fontSize:13,fontWeight:800,marginBottom:6,color:tc?.color||"#e2e8f0"}}>{scoreModal.match.teamA?.name}</div>
+                  ); })()}
+                  <input className="score-input" value={sA} onChange={e=>setSA(e.target.value)} type="number" min="0"/>
+                </div>
+                <div style={{color:"#475569",fontSize:20,fontWeight:900}}>–</div>
+                <div style={{flex:1,textAlign:"center"}}>
+                  {(() => { const tc=teamById(scoreModal.match.teamB?.id); return (
+                    <div style={{fontSize:13,fontWeight:800,marginBottom:6,color:tc?.color||"#e2e8f0"}}>{scoreModal.match.teamB?.name}</div>
+                  ); })()}
+                  <input className="score-input" value={sB} onChange={e=>setSB(e.target.value)} type="number" min="0"/>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Winner</div>
+              <div style={{display:"flex",gap:8,marginBottom:16}}>
+                {[{side:"A",team:scoreModal.match.teamA},{side:"B",team:scoreModal.match.teamB}].map(({side,team})=>{
+                  const tc=teamById(team?.id);
+                  return (
+                    <button key={side} onClick={()=>{
+                      recordTournamentResult(scoreModal.roundIdx,scoreModal.matchIdx,side,sA,sB);
+                      setScoreModal(null);
+                    }} style={{flex:1,minHeight:52,borderRadius:12,
+                      border:"1.5px solid "+(tc?.color||"#1a2f3a"),
+                      background:(tc?.color||"#38bdf8")+"18",
+                      color:tc?.color||"#e2e8f0",fontWeight:800,fontSize:14,
+                      display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                      {tc && <div style={{width:20,height:20,borderRadius:4,background:tc.color+"33",border:"1.5px solid "+tc.color,fontSize:10,fontWeight:900,color:tc.color,display:"flex",alignItems:"center",justifyContent:"center"}}>{tc.name[0]}</div>}
+                      {team?.name} 👑
+                    </button>
+                  );
+                })}
+              </div>
+              <button className="btn-cancel-sheet" onClick={()=>setScoreModal(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+      </div>
+    );
+  };
+
+  // ── LEADERBOARD ──────────────────────────────────────────────────────────────
+  const ViewLeaderboard = () => {
+    const sorted = [...state.players]
+      .filter(p=>p.gamesPlayed>0)
+      .sort((a,b)=> b.wins!==a.wins ? b.wins-a.wins : a.losses-b.losses);
+
+    return (
+      <div className="view">
+        <div className="card">
+          <div className="card-title">🏅 Leaderboard</div>
+          {sorted.length === 0 && <div className="empty-hint">No matches played yet</div>}
+          {sorted.map((p,i)=>(
+            <div key={p.id} className="lb-row">
+              <div className="lb-rank" style={{color:["#facc15","#94a3b8","#cd7c2f","#475569"][Math.min(i,3)]}}>
+                {["🥇","🥈","🥉"][i] || `#${i+1}`}
+              </div>
+              <div className="av-sm" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"44",color:SKILL_COLOR[p.skill]}}>
+                {p.name[0]}
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:16}}>{p.name}</div>
+                <div style={{fontSize:11,color:SKILL_COLOR[p.skill]}}>{p.skill}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontWeight:900,fontSize:18,color:"#1aff7a"}}>{p.wins}W</div>
+                <div style={{fontSize:11,color:"#475569"}}>{p.gamesPlayed} games · {p.losses}L</div>
+              </div>
+              <div style={{width:40,textAlign:"center"}}>
+                <div style={{fontSize:12,fontWeight:800,color:"#38bdf8"}}>
+                  {p.gamesPlayed>0?Math.round(p.wins/p.gamesPlayed*100):0}%
+                </div>
+                <div style={{fontSize:9,color:"#475569"}}>WIN</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Per-session type stats */}
+        {["Friendly","Open","Tournament"].map(type=>{
+          const typeMatches = state.matches.filter(m=>m.sessionType===type);
+          if (typeMatches.length===0) return null;
+          return (
+            <div key={type} className="card">
+              <div className="card-title">{type} — {typeMatches.length} matches</div>
+              {typeMatches.slice(-4).reverse().map(m=>(
+                <div key={m.id} className="match-mini">
+                  <div className="match-teams">
+                    <span className="winner-team">{m.winner.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                    <span className="match-score">{m.scoreA} – {m.scoreB}</span>
+                    <span className="loser-team">{m.loser.map(id=>playerById(id)?.name||"?").join(" & ")}</span>
+                  </div>
+                  <div className="match-meta">{fmt(m.startTime)}</div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // ── END MATCH MODAL ──────────────────────────────────────────────────────────
+  const ModalEndMatch = () => {
+    if (!modal || modal.type !== "endMatch") return null;
+    const m = modal.match;
+    const [sA, setSA] = useState("21");
+    const [sB, setSB] = useState("15");
+    const [winner, setWinner] = useState(null);
+    const teamANames = m.teamA.map(id=>playerById(id)?.name||"?").join(" & ");
+    const teamBNames = m.teamB.map(id=>playerById(id)?.name||"?").join(" & ");
+
+    return (
+      <div className="overlay">
+        <div className="sheet">
+          <div className="sheet-handle"/>
+          <div className="sheet-title">Record Result</div>
+          <div style={{fontSize:11,color:"#475569",textAlign:"center",marginBottom:16,letterSpacing:1}}>{m.sessionType.toUpperCase()}</div>
+
+          {/* Score inputs */}
+          <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
+            <div style={{flex:1,textAlign:"center"}}>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:6,color:"#e2e8f0"}}>{teamANames}</div>
+              <input className="score-input" value={sA} onChange={e=>setSA(e.target.value)} type="number" min="0"/>
+            </div>
+            <div style={{color:"#475569",fontSize:20,fontWeight:900}}>–</div>
+            <div style={{flex:1,textAlign:"center"}}>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:6,color:"#e2e8f0"}}>{teamBNames}</div>
+              <input className="score-input" value={sB} onChange={e=>setSB(e.target.value)} type="number" min="0"/>
+            </div>
+          </div>
+
+          {/* Winner select */}
+          <div style={{marginBottom:16}}>
+            <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Winner</div>
+            <div style={{display:"flex",gap:8}}>
+              <button className={`winner-btn ${winner==="A"?"winner-active":""}`} onClick={()=>setWinner("A")}>
+                {teamANames}
+              </button>
+              <button className={`winner-btn ${winner==="B"?"winner-active":""}`} onClick={()=>setWinner("B")}>
+                {teamBNames}
+              </button>
+            </div>
+          </div>
+
+          <div style={{display:"flex",gap:10}}>
+            <button className="btn-cancel-sheet" onClick={()=>setModal(null)}>Cancel</button>
+            <button className="btn-green" style={{flex:1,opacity:winner?1:.4}}
+              onClick={()=>{ if(!winner){toast$("Select a winner","err");return;} endMatch(modal.courtId,winner,sA,sB); setModal(null); }}>
+              ✓ Save Result
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ─── NAV ─────────────────────────────────────────────────────────────────────
+
+  // ── SETUP VIEW ────────────────────────────────────────────────────────────────
+  // ── ADMIN VIEW ────────────────────────────────────────────────────────────────
+  const ViewAdmin = () => {
+    const adminPin = (state.settings && state.settings.adminPin) || "1234";
+    const sessionFee = (state.settings && state.settings.sessionFee) || 5;
+
+    if (!adminUnlocked) {
+      return (
+        <div className="view" style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"60vh"}}>
+          <div className="card" style={{maxWidth:320,width:"100%",textAlign:"center"}}>
+            <div style={{fontSize:40,marginBottom:12}}>🔐</div>
+            <div className="card-title">Admin Access</div>
+            <div style={{fontSize:13,color:"#475569",marginBottom:16}}>Enter PIN to access admin panel</div>
+            <input className="txt-input" type="password" placeholder="Enter PIN"
+              value={adminPinInput} onChange={e=>setAdminPinInput(e.target.value)}
+              onKeyDown={e=>{
+                if(e.key==="Enter"){
+                  if(adminPinInput === adminPin){ setAdminUnlocked(true); setAdminPinInput(""); toast$("✓ Admin unlocked"); }
+                  else { toast$("Wrong PIN","err"); setAdminPinInput(""); }
+                }
+              }}
+              style={{textAlign:"center",fontSize:20,letterSpacing:8,marginBottom:12}}
+            />
+            <button className="btn-green" onClick={()=>{
+              if(adminPinInput === adminPin){ setAdminUnlocked(true); setAdminPinInput(""); toast$("✓ Admin unlocked"); }
+              else { toast$("Wrong PIN","err"); setAdminPinInput(""); }
+            }}>Unlock</button>
+          </div>
+        </div>
+      );
+    }
+
+    const totalPlayers = state.players.length;
+    const paidPlayers  = state.players.filter(p=>p.hasPaid);
+    const unpaidPlayers = state.players.filter(p=>!p.hasPaid && p.checkedIn);
+    const totalRevenue = paidPlayers.reduce((sum,p)=>sum+(p.amountPaid||0),0);
+    const expectedRevenue = totalPlayers * sessionFee;
+
+    return (
+      <div className="view">
+        {/* Header */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+          <div style={{fontSize:18,fontWeight:900,letterSpacing:1}}>Admin Panel</div>
+          <button onClick={()=>setAdminUnlocked(false)}
+            style={{background:"#1a2f3a",border:"1px solid #334155",borderRadius:8,
+              color:"#f87171",padding:"6px 12px",fontSize:12,fontWeight:700}}>🔒 Lock</button>
+        </div>
+
+        {/* Revenue Summary */}
+        <div className="card" style={{borderColor:"#1aff7a44"}}>
+          <div className="card-title">💰 Revenue Summary</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:16}}>
+            {[
+              {label:"Collected", value:`$${totalRevenue}`, color:"#1aff7a"},
+              {label:"Expected",  value:`$${expectedRevenue}`, color:"#38bdf8"},
+              {label:"Unpaid",    value:`$${Math.max(0,expectedRevenue-totalRevenue)}`, color:"#f87171"},
+            ].map(s=>(
+              <div key={s.label} style={{background:"#0f1f28",borderRadius:10,padding:"12px 8px",textAlign:"center",border:"1px solid #1a2f3a"}}>
+                <div style={{fontSize:22,fontWeight:900,color:s.color,lineHeight:1}}>{s.value}</div>
+                <div style={{fontSize:10,color:"#475569",marginTop:4,letterSpacing:2,textTransform:"uppercase"}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"#475569",padding:"8px 0",borderTop:"1px solid #1a2f3a"}}>
+            <span>Session Fee: <span style={{color:"#e2e8f0",fontWeight:700}}>${sessionFee}/player</span></span>
+            <span>{paidPlayers.length}/{totalPlayers} paid</span>
+          </div>
+          {/* Progress bar */}
+          <div style={{marginTop:10,height:6,background:"#1a2f3a",borderRadius:3,overflow:"hidden"}}>
+            <div style={{height:"100%",background:"#1aff7a",width:`${totalPlayers>0?(paidPlayers.length/totalPlayers*100):0}%`,borderRadius:3,transition:"width 0.3s"}}/>
+          </div>
+        </div>
+
+        {/* Unpaid Players */}
+        {unpaidPlayers.length > 0 && (
+          <div className="card" style={{borderColor:"#f8717144"}}>
+            <div className="card-title" style={{color:"#f87171"}}>❌ Unpaid ({unpaidPlayers.length})</div>
+            {unpaidPlayers.map(p=>(
+              <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid #0f1f28"}}>
+                <div className="p-avatar" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"55",color:SKILL_COLOR[p.skill]}}>
+                  {p.name[0].toUpperCase()}
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                  <div style={{fontSize:11,color:"#475569"}}>{SKILL_SHORT[p.skill]} · {p.gamesPlayed}G played</div>
+                </div>
+                <button onClick={()=>togglePayment(p.id)}
+                  style={{background:"#1aff7a18",border:"1.5px solid #1aff7a44",borderRadius:10,
+                    color:"#1aff7a",padding:"8px 14px",fontWeight:800,fontSize:12,letterSpacing:1}}>
+                  Mark Paid ${sessionFee}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Paid Players */}
+        {paidPlayers.length > 0 && (
+          <div className="card" style={{borderColor:"#1aff7a22"}}>
+            <div className="card-title" style={{color:"#1aff7a"}}>✅ Paid ({paidPlayers.length})</div>
+            {paidPlayers.map(p=>(
+              <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid #0f1f28"}}>
+                <div className="p-avatar" style={{background:SKILL_COLOR[p.skill]+"22",borderColor:SKILL_COLOR[p.skill]+"55",color:SKILL_COLOR[p.skill]}}>
+                  {p.name[0].toUpperCase()}
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:15}}>{p.name}</div>
+                  <div style={{fontSize:11,color:"#475569"}}>{SKILL_SHORT[p.skill]} · Paid ${p.amountPaid||sessionFee}</div>
+                </div>
+                <button onClick={()=>togglePayment(p.id)}
+                  style={{background:"#f8717110",border:"1px solid #f8717130",borderRadius:10,
+                    color:"#f87171",padding:"6px 10px",fontWeight:700,fontSize:11}}>
+                  Undo
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Settings */}
+        <div className="card">
+          <div className="card-title">⚙ Session Settings</div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:8,fontWeight:700}}>⏱ Default Game Duration</div>
+            <div className="pill-row">
+              {TIMER_OPTIONS.map(t=>(
+                <button key={t}
+                  className={`pill ${((state.settings&&state.settings.gameDuration)||15)===t?"pill-active":""}`}
+                  onClick={()=>update(s=>{ if(!s.settings) s.settings={}; s.settings.gameDuration=t; })}>
+                  {t} min
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:8,fontWeight:700}}>💵 Session Fee ($)</div>
+            <div className="pill-row">
+              {[3,5,8,10,15,20].map(f=>(
+                <button key={f}
+                  className={`pill ${((state.settings&&state.settings.sessionFee)||5)===f?"pill-active":""}`}
+                  onClick={()=>update(s=>{ if(!s.settings) s.settings={}; s.settings.sessionFee=f; })}>
+                  ${f}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginBottom:8,fontWeight:700}}>🔐 Admin PIN</div>
+            <input className="txt-input" type="password" placeholder="New PIN"
+              defaultValue={state.settings&&state.settings.adminPin}
+              onBlur={e=>{ if(e.target.value.trim()) update(s=>{ if(!s.settings) s.settings={}; s.settings.adminPin=e.target.value.trim(); }); }}
+              style={{maxWidth:160}}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const ViewSetup = () => (
+    <div className="view">
+      <div className="card" style={{borderColor:"#38bdf844"}}>
+        <div className="card-title" style={{color:"#38bdf8"}}>🔥 Firebase Setup Guide</div>
+        <div style={{fontSize:13,color:"#94a3b8",lineHeight:1.7,marginBottom:16}}>
+          Follow these steps once. After setup, all your players, matches and tournament data
+          will be saved in the cloud and shared across every phone automatically.
+        </div>
+
+        {[
+          { n:1, title:"Create a free Google account", body:'Go to accounts.google.com if you don't have one already.' },
+          { n:2, title:"Open Firebase Console", body:'Go to console.firebase.google.com and click "Create a project". Name it anything (e.g. "BadmintonApp"). Disable Google Analytics → click Create.' },
+          { n:3, title:"Add a Web App", body:'Inside your project click the </> (Web) icon. Give it a nickname like "BadmintonWeb". Click "Register app". You will see a code block — copy everything inside the firebaseConfig = { ... } curly braces.' },
+          { n:4, title:"Enable Realtime Database", body:'In the left sidebar click "Build" → "Realtime Database" → "Create Database". Choose any region. Select "Start in test mode" → click Enable.' },
+          { n:5, title:"Paste your config into the app", body:'Open badminton-manager.jsx in a text editor. At the very top find FIREBASE_CONFIG and replace each PASTE_YOUR_..._HERE value with the matching value you copied in step 3. Save the file.' },
+          { n:6, title:"Deploy your app", body:'Drag your updated files to app.netlify.com/drop (or your hosting of choice). Done — your data now lives in the cloud! 🎉' },
+        ].map(s => (
+          <div key={s.n} style={{display:"flex",gap:12,marginBottom:16,paddingBottom:16,borderBottom:"1px solid #0f1f28"}}>
+            <div style={{width:32,height:32,borderRadius:10,background:"#38bdf822",border:"1.5px solid #38bdf844",
+              display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:900,
+              color:"#38bdf8",flexShrink:0}}>{s.n}</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:14,marginBottom:4}}>{s.title}</div>
+              <div style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>{s.body}</div>
+            </div>
+          </div>
+        ))}
+
+        <div style={{background:"#0f1f28",borderRadius:10,padding:"12px 14px",marginBottom:16}}>
+          <div style={{fontSize:10,color:"#38bdf8",letterSpacing:2,textTransform:"uppercase",fontWeight:700,marginBottom:8}}>
+            What your config looks like
+          </div>
+          <pre style={{margin:0,fontSize:11,color:"#94a3b8",fontFamily:"'DM Mono',monospace",lineHeight:1.8,overflowX:"auto"}}>{`const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSy...",
+  authDomain:        "your-app.firebaseapp.com",
+  databaseURL:       "https://your-app-default-rtdb.firebaseio.com",
+  projectId:         "your-app-id",
+  storageBucket:     "your-app.appspot.com",
+  messagingSenderId: "123456789",
+  appId:             "1:123:web:abc123",
+};`}</pre>
+        </div>
+
+        <div style={{background:"#facc1510",border:"1px solid #facc1530",borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontSize:12,color:"#facc15",fontWeight:700,marginBottom:4}}>💡 Until Firebase is set up</div>
+          <div style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>
+            The app still works fully — data is saved on this device using localStorage.
+            You won't lose anything while you set up Firebase.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+
+  // ── PLAYER SELF CHECK-IN VIEW ─────────────────────────────────────────────────
+  const ViewCheckin = () => {
+    const [searchQ, setSearchQ] = useState("");
+    const [selectedId, setSelectedId] = useState(null);
+
+    const filtered = state.players.filter(p =>
+      p.name.toLowerCase().includes(searchQ.toLowerCase())
+    );
+    const selectedPlayer = selectedId ? state.players.find(p => p.id === selectedId) : null;
+    const inQueue = selectedPlayer
+      ? state.queue.some(q => q.playerIds && q.playerIds.includes(selectedId))
+      : false;
+    const onCourt = selectedPlayer
+      ? state.courts.some(c => c.match && [...(c.match.teamA||[]),...(c.match.teamB||[])].includes(selectedId))
+      : false;
+    const queuePos = inQueue
+      ? state.queue.findIndex(q => q.playerIds && q.playerIds.includes(selectedId)) + 1
+      : null;
+
+    // After selecting a player, show their personal panel
+    if (selectedPlayer) {
+      const s = onCourt ? "oncourt" : inQueue ? "inqueue" : selectedPlayer.checkedIn ? "ready" : "absent";
+      const statusInfo = {
+        oncourt: { color:"#facc15", label:"ON COURT", icon:"🏸" },
+        inqueue: { color:"#38bdf8", label:`QUEUE #${queuePos}`, icon:"⏳" },
+        ready:   { color:"#1aff7a", label:"CHECKED IN", icon:"✓" },
+        absent:  { color:"#f87171", label:"NOT CHECKED IN", icon:"○" },
+      }[s];
+
+      return (
+        <div className="view" style={{paddingTop:20}}>
+          {/* Player card */}
+          <div className="card" style={{borderColor:statusInfo.color+"44",textAlign:"center",padding:"28px 20px"}}>
+            <div style={{width:72,height:72,borderRadius:"50%",background:SKILL_COLOR[selectedPlayer.skill]+"22",
+              border:"3px solid "+SKILL_COLOR[selectedPlayer.skill],
+              display:"flex",alignItems:"center",justifyContent:"center",
+              fontSize:28,fontWeight:900,color:SKILL_COLOR[selectedPlayer.skill],
+              margin:"0 auto 14px"}}>
+              {selectedPlayer.name[0].toUpperCase()}
+            </div>
+            <div style={{fontSize:26,fontWeight:900,marginBottom:4}}>{selectedPlayer.name}</div>
+            <div style={{fontSize:11,color:SKILL_COLOR[selectedPlayer.skill],letterSpacing:2,textTransform:"uppercase",marginBottom:14}}>
+              {selectedPlayer.skill}
+            </div>
+            <div style={{display:"inline-flex",alignItems:"center",gap:6,
+              background:statusInfo.color+"18",border:"1.5px solid "+statusInfo.color+"44",
+              borderRadius:100,padding:"6px 16px",marginBottom:20}}>
+              <span style={{fontSize:14}}>{statusInfo.icon}</span>
+              <span style={{fontSize:12,fontWeight:800,letterSpacing:2,color:statusInfo.color,textTransform:"uppercase"}}>
+                {statusInfo.label}
+              </span>
+            </div>
+
+            {/* Stats row */}
+            <div style={{display:"flex",justifyContent:"center",gap:24,marginBottom:20,padding:"14px 0",
+              borderTop:"1px solid #0f1f28",borderBottom:"1px solid #0f1f28"}}>
+              {[
+                {n:selectedPlayer.gamesPlayed, l:"Games"},
+                {n:selectedPlayer.wins,        l:"Wins"},
+                {n:selectedPlayer.losses,      l:"Losses"},
+                {n:selectedPlayer.checkedIn ? fmt(selectedPlayer.checkInTime) : "—", l:"Check-in"},
+              ].map(x=>(
+                <div key={x.l} style={{textAlign:"center"}}>
+                  <div style={{fontSize:20,fontWeight:900,color:"#e2e8f0",lineHeight:1}}>{x.n}</div>
+                  <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase",marginTop:3}}>{x.l}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+
+              {/* Check in / out */}
+              {!selectedPlayer.checkedIn && !onCourt && (
+                <button className="btn-green" onClick={()=>{ toggleCheckIn(selectedId); toast$("✓ Checked in! Welcome 🏸"); }}>
+                  ✓ Check In Now
+                </button>
+              )}
+
+              {/* Join queue */}
+              {selectedPlayer.checkedIn && !inQueue && !onCourt && (
+                <button className="btn-green" style={{background:"#38bdf8"}}
+                  onClick={()=>playerSelfJoinQueue(selectedId)}>
+                  ➕ Join the Queue
+                </button>
+              )}
+
+              {/* On court — info only */}
+              {onCourt && (
+                <div style={{padding:"14px",background:"#facc1510",border:"1px solid #facc1530",borderRadius:12,
+                  fontSize:13,fontWeight:700,color:"#facc15",textAlign:"center"}}>
+                  🏸 You are currently playing on court!
+                </div>
+              )}
+
+              {/* In queue — skip or leave */}
+              {inQueue && !onCourt && (<>
+                <div style={{padding:"12px",background:"#38bdf810",border:"1px solid #38bdf830",borderRadius:12,
+                  fontSize:13,color:"#38bdf8",fontWeight:700,textAlign:"center"}}>
+                  ⏳ You are #{queuePos} in queue
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <button className="btn-outline" style={{borderColor:"#facc1544",color:"#facc15",minHeight:48}}
+                    onClick={()=>{ skipQueueTurn(selectedId); setSelectedId(null); }}>
+                    ↩ Skip My Turn
+                  </button>
+                  <button className="btn-outline" style={{borderColor:"#f8717144",color:"#f87171",minHeight:48}}
+                    onClick={()=>{ playerLeaveQueue(selectedId); setSelectedId(null); }}>
+                    ✕ Leave Queue
+                  </button>
+                </div>
+              </>)}
+
+              {/* Check out */}
+              {selectedPlayer.checkedIn && !onCourt && (
+                <button className="btn-outline" style={{borderColor:"#f8717130",color:"#f87171"}}
+                  onClick={()=>{ toggleCheckIn(selectedId); setSelectedId(null); toast$("See you next time! 👋"); }}>
+                  Check Out
+                </button>
+              )}
+
+            </div>
+          </div>
+
+          {/* Back button */}
+          <button className="btn-outline" style={{borderColor:"#1a2f3a",color:"#475569"}}
+            onClick={()=>setSelectedId(null)}>
+            ← Back to player list
+          </button>
+
+          {/* Live scoreboard */}
+          {state.courts.some(c=>c.match) && (
+            <div className="card" style={{padding:0,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px 8px",borderBottom:"1px solid #0f1f28"}}>
+                <div className="card-title" style={{marginBottom:0}}>🏸 Live Scores</div>
+              </div>
+              {state.courts.filter(c=>c.match).map(court => {
+                const m = court.match;
+                const sA = m.liveScoreA||0;
+                const sB = m.liveScoreB||0;
+                const status = m.status==="paused"?"paused":matchMins(m)>=GAME_DURATION?"overtime":"playing";
+                const col = {playing:"#facc15",overtime:"#f87171",paused:"#a78bfa"}[status];
+                const aWin = sA>=21, bWin = sB>=21;
+                return (
+                  <div key={court.id} style={{padding:"14px 16px",borderBottom:"1px solid #0a1218"}}>
+                    {/* Court label + status */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                      <span style={{fontSize:13,fontWeight:800,letterSpacing:1,color:col}}>{court.name}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:9,color:"#475569",fontFamily:"'DM Mono',monospace"}}>
+                          {fmtElapsed(matchSecs(m))} played
+                        </span>
+                        <span className="badge" style={{background:col,color:"#050d0a",animation:status==="overtime"?"blink 1s infinite":"none"}}>
+                          {status.toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+                    {/* Big score display */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 60px 1fr",gap:8,alignItems:"center"}}>
+                      <div style={{textAlign:"center"}}>
+                        <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:4,
+                          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {m.teamA.map(id=>playerById(id)?.name||"?").join(" & ")}
+                        </div>
+                        <div style={{fontSize:56,fontWeight:900,lineHeight:1,
+                          color:aWin?"#1aff7a":"#e2e8f0",
+                          textShadow:aWin?"0 0 24px #1aff7a88":"none",
+                          fontFamily:"'DM Mono',monospace"}}>
+                          {sA}
+                        </div>
+                        {aWin && <div style={{fontSize:10,color:"#1aff7a",fontWeight:800,marginTop:4,letterSpacing:1}}>WINS 🏆</div>}
+                      </div>
+                      <div style={{textAlign:"center",fontSize:18,fontWeight:900,color:"#1a2f3a"}}>–</div>
+                      <div style={{textAlign:"center"}}>
+                        <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:4,
+                          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {m.teamB.map(id=>playerById(id)?.name||"?").join(" & ")}
+                        </div>
+                        <div style={{fontSize:56,fontWeight:900,lineHeight:1,
+                          color:bWin?"#1aff7a":"#e2e8f0",
+                          textShadow:bWin?"0 0 24px #1aff7a88":"none",
+                          fontFamily:"'DM Mono',monospace"}}>
+                          {sB}
+                        </div>
+                        {bWin && <div style={{fontSize:10,color:"#1aff7a",fontWeight:800,marginTop:4,letterSpacing:1}}>WINS 🏆</div>}
+                      </div>
+                    </div>
+                    {/* Progress bars */}
+                    <div style={{marginTop:12,display:"flex",gap:4,alignItems:"center"}}>
+                      <div style={{flex:sA||1,height:4,borderRadius:2,
+                        background:aWin?"#1aff7a":"#facc15",transition:"flex 0.3s"}}/>
+                      <div style={{fontSize:9,color:"#334155",letterSpacing:1,flexShrink:0}}>21</div>
+                      <div style={{flex:sB||1,height:4,borderRadius:2,
+                        background:bWin?"#1aff7a":"#38bdf8",transition:"flex 0.3s"}}/>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Courts with no active match */}
+          {state.courts.some(c=>!c.match) && (
+            <div className="card">
+              <div className="card-title">🏸 Courts</div>
+              {state.courts.filter(c=>!c.match).map(court=>(
+                <div key={court.id} className="court-mini" style={{borderColor:"#1aff7a22",background:"#1aff7a08",marginBottom:6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontWeight:800,fontSize:15,color:"#1aff7a"}}>{court.name}</span>
+                    <span className="badge" style={{background:"#1aff7a",color:"#050d0a"}}>OPEN</span>
+                  </div>
+                  <div style={{fontSize:12,color:"#1a4a2a",marginTop:4}}>No active match</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Queue snapshot */}
+          {state.queue.length > 0 && (
+            <div className="card">
+              <div className="card-title">⏳ Queue ({state.queue.length})</div>
+              {state.queue.map((q,i) => {
+                const names = q.solo
+                  ? [(state.players.find(p=>p.id===q.playerIds?.[0])?.name)||"?"]
+                  : [...(q.teamA||[]),...(q.teamB||[])].map(id=>playerById(id)?.name||"?");
+                return (
+                  <div key={q.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",
+                    borderBottom:i<state.queue.length-1?"1px solid #0f1f28":"none"}}>
+                    <div style={{width:26,height:26,borderRadius:"50%",background:i===0?"#38bdf820":"#0f1f28",
+                      border:"1.5px solid "+(i===0?"#38bdf8":"#1a2f3a"),
+                      display:"flex",alignItems:"center",justifyContent:"center",
+                      fontSize:11,fontWeight:900,color:i===0?"#38bdf8":"#475569",flexShrink:0}}>
+                      {i+1}
+                    </div>
+                    <div style={{flex:1,fontSize:13,fontWeight:600,color:"#94a3b8"}}>
+                      {names.join(q.solo?" (waiting)":" & ")}
+                      {q.skipped > 0 && <span style={{marginLeft:6,fontSize:10,color:"#facc15"}}>↩×{q.skipped}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Player list (name selection screen) ──────────────────────────────────
+    const arrivedToday = [...state.players]
+      .filter(p => p.checkedIn)
+      .sort((a,b) => a.checkInTime - b.checkInTime);
+    const notCheckedIn = state.players.filter(p => !p.checkedIn);
+
+    return (
+      <div className="view" style={{paddingTop:16}}>
+
+        {/* Welcome banner */}
+        <div style={{textAlign:"center",marginBottom:4,padding:"20px 0 10px"}}>
+          <div style={{fontSize:40,marginBottom:8}}>🏸</div>
+          <div style={{fontSize:22,fontWeight:900,letterSpacing:2,textTransform:"uppercase"}}>Welcome!</div>
+          <div style={{fontSize:13,color:"#475569",marginTop:4}}>Tap your name to check in or manage your queue spot</div>
+        </div>
+
+        {/* Search */}
+        <input className="txt-input" placeholder="🔍  Search your name…"
+          value={searchQ} onChange={e=>setSearchQ(e.target.value)}
+          style={{marginBottom:16}}/>
+
+        {/* Checked in players */}
+        {(searchQ ? filtered.filter(p=>p.checkedIn) : arrivedToday).length > 0 && (
+          <div className="card" style={{marginBottom:12}}>
+            <div className="card-title" style={{color:"#1aff7a"}}>✓ Checked In · {arrivedToday.length} players</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {(searchQ ? filtered.filter(p=>p.checkedIn) : arrivedToday).map(p => {
+                const onC = state.courts.some(c => c.match && [...(c.match.teamA||[]),...(c.match.teamB||[])].includes(p.id));
+                const inQ = state.queue.some(q => q.playerIds && q.playerIds.includes(p.id));
+                const dot = onC ? "#facc15" : inQ ? "#38bdf8" : "#1aff7a";
+                return (
+                  <button key={p.id} onClick={()=>setSelectedId(p.id)}
+                    style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",
+                      background:"#0f1f28",border:"1.5px solid #1a2f3a",borderRadius:12,
+                      textAlign:"left",width:"100%"}}>
+                    <div style={{width:40,height:40,borderRadius:"50%",flexShrink:0,
+                      background:SKILL_COLOR[p.skill]+"22",border:"1.5px solid "+SKILL_COLOR[p.skill]+"55",
+                      display:"flex",alignItems:"center",justifyContent:"center",
+                      fontSize:16,fontWeight:900,color:SKILL_COLOR[p.skill]}}>
+                      {p.name[0].toUpperCase()}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:16}}>{p.name}</div>
+                      <div style={{fontSize:10,color:"#475569",marginTop:2}}>
+                        {SKILL_SHORT[p.skill]} · checked in {fmt(p.checkInTime)}
+                        {onC && <span style={{color:"#facc15",marginLeft:6}}>· On Court 🏸</span>}
+                        {inQ && <span style={{color:"#38bdf8",marginLeft:6}}>· In Queue ⏳</span>}
+                      </div>
+                    </div>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:dot,flexShrink:0}}/>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Not yet checked in */}
+        {(searchQ ? filtered.filter(p=>!p.checkedIn) : notCheckedIn).length > 0 && (
+          <div className="card">
+            <div className="card-title" style={{color:"#475569"}}>Not Yet Arrived · {notCheckedIn.length}</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {(searchQ ? filtered.filter(p=>!p.checkedIn) : notCheckedIn).map(p => (
+                <button key={p.id} onClick={()=>setSelectedId(p.id)}
+                  style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",
+                    background:"#0a1218",border:"1.5px solid #0f1f28",borderRadius:12,
+                    textAlign:"left",width:"100%",opacity:0.6}}>
+                  <div style={{width:40,height:40,borderRadius:"50%",flexShrink:0,
+                    background:"#1a2f3a",border:"1.5px solid #1a2f3a",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:16,fontWeight:900,color:"#334155"}}>
+                    {p.name[0].toUpperCase()}
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:700,fontSize:16,color:"#475569"}}>{p.name}</div>
+                    <div style={{fontSize:10,color:"#334155",marginTop:2}}>Tap to check in</div>
+                  </div>
+                  <div style={{fontSize:12,color:"#334155"}}>→</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {state.players.length === 0 && (
+          <div className="empty-hint">No players registered yet.<br/>Ask the admin to add players first.</div>
+        )}
+      </div>
+    );
+  };
+
+  const navItems = [
+    { id:"checkin",     icon:"✋", label:"Check In" },
+    { id:"dashboard",   icon:"⊞", label:"Home"     },
+    { id:"courts",      icon:"🏸", label:"Courts"   },
+    { id:"tournament",  icon:"🏆", label:"Bracket"  },
+    { id:"leaderboard", icon:"🏅", label:"Scores"   },
+    { id:"players",     icon:"👥", label:"Players"  },
+    { id:"admin",       icon:"🔐", label:"Admin"    },
+    { id:"setup",       icon:"⚙", label:"Setup"    },
+  ];
+
+  return (
+    <div style={{ minHeight:"100dvh", background:"#070d0f", color:"#e2e8f0",
+      fontFamily:"'DM Sans','Barlow Condensed',sans-serif", overflowX:"hidden" }}>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&family=DM+Mono:wght@500&display=swap');
+        *, *::before, *::after { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+        input, textarea { font-size:16px!important; }
+        input { outline:none; -webkit-appearance:none; }
+        input::placeholder { color:#1e3a4a; }
+        button { cursor:pointer; -webkit-appearance:none; font-family:inherit; border:none; }
+        button:active { opacity:.75; transform:scale(.97); transition:.08s; }
+        ::-webkit-scrollbar { width:3px; }
+        ::-webkit-scrollbar-thumb { background:#1e3a4a; border-radius:2px; }
+
+        .view { padding:12px 14px calc(env(safe-area-inset-bottom,0px)+80px); max-width:580px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+
+        .card { background:#0d1a20; border:1px solid #1a2f3a; border-radius:16px; padding:16px; }
+        .card-title { font-size:11px; font-weight:800; letter-spacing:3px; color:#38bdf8; text-transform:uppercase; margin-bottom:14px; }
+
+        .stat-row { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+        .stat-card { background:#0d1a20; border:1px solid #1a2f3a; border-radius:12px; padding:12px 8px; text-align:center; }
+        .stat-big  { font-size:28px; font-weight:900; line-height:1; }
+        .stat-lbl  { font-size:9px; color:#475569; letter-spacing:2px; text-transform:uppercase; margin-top:4px; }
+
+        .pill-row  { display:flex; flex-wrap:wrap; gap:6px; }
+        .pill      { padding:6px 14px; border:1px solid #1a2f3a; border-radius:100px; font-size:12px; font-weight:700; color:#475569; background:transparent; letter-spacing:.5px; }
+        .pill-active { background:#38bdf8; color:#070d0f; border-color:#38bdf8; }
+        .mt8  { margin-top:8px; }
+        .mt10 { margin-top:10px; }
+        .mt12 { margin-top:12px; }
+        .mt4  { margin-top:4px; }
+        .mb10 { margin-bottom:10px; }
+
+        .btn-green { width:100%; min-height:50px; background:#1aff7a; color:#050d0a; border-radius:12px; font-weight:800; font-size:14px; letter-spacing:1px; display:flex; align-items:center; justify-content:center; }
+        .btn-green.btn-disabled { opacity:.35; pointer-events:none; }
+        .btn-outline { width:100%; min-height:48px; background:transparent; border:1.5px solid; border-radius:12px; font-weight:800; font-size:13px; letter-spacing:1px; display:flex; align-items:center; justify-content:center; }
+
+        .badge { font-size:9px; font-weight:900; letter-spacing:2px; padding:3px 8px; border-radius:100px; text-transform:uppercase; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+        .empty-hint { font-size:13px; color:#1e3a4a; text-align:center; padding:20px 0; letter-spacing:1px; }
+        .warn-box   { background:#2a1505; border:1px solid #7c3409; border-radius:8px; padding:10px 14px; font-size:12px; color:#fb923c; margin-bottom:10px; }
+
+        /* Players */
+        .player-row-full { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #0f1f28; }
+        .player-row-full:last-child { border-bottom:none; }
+        .p-absent { opacity:.45; }
+        .p-avatar { width:40px; height:40px; border-radius:50%; border:1.5px solid; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:900; }
+        .p-info   { flex:1; min-width:0; }
+        .p-name   { font-weight:700; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .p-meta   { display:flex; flex-wrap:wrap; gap:8px; margin-top:3px; align-items:center; }
+        .skill-tag   { font-size:10px; font-weight:800; letter-spacing:1px; }
+        .checkin-time { font-size:11px; color:#475569; }
+        .icon-btn { width:38px; height:38px; border-radius:8px; background:#0f1f28; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; }
+
+        /* Courts */
+        .court-mini { border:1px solid; border-radius:10px; padding:10px 12px; margin-bottom:8px; }
+        .court-mini:last-child { margin-bottom:0; }
+        .court-mini-name { font-size:15px; font-weight:800; letter-spacing:1px; }
+        .court-mini-teams { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; margin-top:6px; flex-wrap:wrap; }
+        .vs   { color:#475569; font-size:10px; font-weight:900; letter-spacing:1px; }
+        .court-timer { margin-left:auto; font-weight:800; font-size:12px; }
+
+        .court-label { font-size:18px; font-weight:900; letter-spacing:2px; text-transform:uppercase; }
+        .court-open-card { border-color:#1aff7a22; }
+
+        .vs-layout { display:flex; gap:10px; align-items:center; }
+        .team-col  { flex:1; display:flex; flex-direction:column; gap:8px; }
+        .vs-badge  { font-size:11px; font-weight:900; color:#475569; letter-spacing:2px; flex-shrink:0; }
+        .player-mini { display:flex; align-items:center; gap:8px; }
+        .av-sm { width:34px; height:34px; border-radius:50%; flex-shrink:0; border:1.5px solid; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:900; }
+        .av-xs { width:22px; height:22px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:900; }
+
+        .team-assign-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+        .team-assign-col  { display:flex; flex-direction:column; gap:6px; }
+        .team-assign-header { font-size:11px; font-weight:800; letter-spacing:2px; color:#38bdf8; text-transform:uppercase; display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+        .player-select-btn { display:flex; align-items:center; gap:6px; padding:8px 10px; background:#0f1f28; border:1.5px solid #1a2f3a; border-radius:10px; width:100%; transition:.1s; }
+        .player-select-btn.selected { border-width:2px; }
+        .player-select-btn.disabled { opacity:.3; pointer-events:none; }
+
+        .queue-mini { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #0f1f28; font-size:12px; color:#94a3b8; }
+        .queue-mini:last-child { border-bottom:none; }
+        .q-num-sm { width:20px; height:20px; border-radius:50%; background:#1a2f3a; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:900; color:#475569; flex-shrink:0; }
+        .queue-row-full { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #0f1f28; }
+        .queue-row-full:last-child { border-bottom:none; }
+        .q-num { width:28px; height:28px; border-radius:50%; background:#1a2f3a; border:1px solid #1e3a4a; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:900; color:#475569; flex-shrink:0; }
+
+        /* Matches */
+        .match-mini { padding:8px 0; border-bottom:1px solid #0f1f28; }
+        .match-mini:last-child { border-bottom:none; }
+        .match-teams { display:flex; align-items:center; gap:8px; font-size:13px; flex-wrap:wrap; }
+        .winner-team { font-weight:800; color:#e2e8f0; }
+        .loser-team  { font-weight:500; color:#475569; }
+        .match-score { font-weight:900; color:#1aff7a; font-size:14px; font-family:'DM Mono',monospace; }
+        .match-meta  { font-size:10px; color:#334155; margin-top:3px; letter-spacing:1px; }
+
+        /* Tournament */
+        .champion-card { background:linear-gradient(135deg,#1a2505,#2a1f00); border-color:#facc1544; text-align:center; padding:24px; }
+        .bracket-match { background:#0f1f28; border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; border:1px solid #1a2f3a; }
+        .bracket-team  { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#0d1a20; border:1.5px solid #1a2f3a; border-radius:10px; width:100%; min-height:48px; }
+        .bracket-team.bracket-winner { border-color:#facc15; background:#facc1510; }
+        .bracket-team.bracket-bye    { opacity:.4; pointer-events:none; }
+        .bracket-vs { font-size:10px; font-weight:900; color:#475569; letter-spacing:2px; text-align:center; }
+
+        /* Leaderboard */
+        .lb-row { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #0f1f28; }
+        .lb-row:last-child { border-bottom:none; }
+        .lb-rank { font-size:20px; width:32px; text-align:center; flex-shrink:0; }
+
+        /* Modal */
+        .overlay { position:fixed; inset:0; z-index:200; background:rgba(0,0,0,.8); backdrop-filter:blur(4px); display:flex; align-items:flex-end; justify-content:center; }
+        .sheet { background:#0d1a20; border:1px solid #1a2f3a; border-radius:20px 20px 0 0; padding:24px 20px calc(env(safe-area-inset-bottom,0px)+24px); width:100%; max-width:520px; animation:sheetUp .22s ease; }
+        .sheet-handle { width:40px; height:4px; background:#1a2f3a; border-radius:2px; margin:0 auto 18px; }
+        .sheet-title  { font-size:18px; font-weight:800; text-align:center; margin-bottom:4px; }
+        .score-input  { width:100%; text-align:center; padding:12px; background:#0f1f28; border:1.5px solid #1a2f3a; border-radius:10px; color:#e2e8f0; font-weight:900; font-size:28px; font-family:'DM Mono',monospace; }
+        .winner-btn   { flex:1; padding:12px 8px; background:#0f1f28; border:1.5px solid #1a2f3a; border-radius:10px; font-weight:700; font-size:12px; color:#94a3b8; text-align:center; }
+        .winner-btn.winner-active { border-color:#1aff7a; background:#1aff7a18; color:#1aff7a; }
+        .btn-cancel-sheet { flex:1; min-height:48px; background:#0f1f28; border:1px solid #1a2f3a; border-radius:12px; color:#475569; font-weight:800; font-size:14px; }
+
+        /* Toast */
+        .toast { position:fixed; top:calc(env(safe-area-inset-top,0px)+14px); left:50%; transform:translateX(-50%) scale(.9); z-index:300; pointer-events:none; background:#1aff7a; color:#050d0a; padding:10px 20px; border-radius:100px; font-weight:800; font-size:13px; letter-spacing:.5px; white-space:nowrap; max-width:90vw; box-shadow:0 4px 24px rgba(0,0,0,.5); opacity:0; transition:.18s; }
+        .toast.show { opacity:1; transform:translateX(-50%) scale(1); }
+        .toast.err  { background:#f87171; color:#fff; }
+
+        /* Header */
+        .app-header { position:sticky; top:0; z-index:50; background:#070d0f; border-bottom:1px solid #0f1f28; padding:calc(env(safe-area-inset-top,0px)+12px) 16px 12px; display:flex; align-items:center; justify-content:space-between; }
+
+        /* Nav */
+        .bottom-nav { position:fixed; bottom:0; left:0; right:0; z-index:50; background:#070d0f; border-top:1px solid #0f1f28; display:flex; padding:8px 0 calc(env(safe-area-inset-bottom,0px)+8px); overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+        .bottom-nav::-webkit-scrollbar { display:none; }
+        .nav-btn { flex:0 0 auto; min-width:60px; }
+        .nav-btn { flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; background:none; padding:6px 0; }
+        .nav-icon { font-size:20px; line-height:1; }
+        .nav-lbl  { font-size:9px; letter-spacing:1.5px; text-transform:uppercase; font-weight:700; }
+
+        @keyframes sheetUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+        @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+
+        /* txt-input */
+        .txt-input { width:100%; min-height:48px; padding:0 14px; background:#0f1f28; border:1.5px solid #1a2f3a; border-radius:10px; color:#e2e8f0; font-family:inherit; font-weight:600; display:block; }
+        select.txt-input { -webkit-appearance:none; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23475569' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 14px center; padding-right:36px; }
+      `}</style>
+
+      {/* Toast */}
+      <div className={`toast ${toast?"show":""} ${toast?.type==="err"?"err":""}`}>
+        {toast?.msg}
+      </div>
+
+      {/* End match modal */}
+      <ModalEndMatch />
+
+      {/* Header */}
+      <div className="app-header">
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:26}}>🏸</span>
+          <div>
+            <div style={{fontSize:18,fontWeight:900,letterSpacing:2,lineHeight:1,textTransform:"uppercase"}}>Badminton Club TCI</div>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}>
+              <div style={{fontSize:9,color:"#38bdf8",letterSpacing:3,textTransform:"uppercase"}}>
+                {state.session.type}
+              </div>
+              {/* Sync indicator */}
+              {{
+                idle:          null,
+                syncing:       <div style={{fontSize:9,color:"#facc15",letterSpacing:1,display:"flex",alignItems:"center",gap:3}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⟳</span> saving…</div>,
+                saved:         <div style={{fontSize:9,color:"#1aff7a",letterSpacing:1}}>✓ synced</div>,
+                offline:       <div style={{fontSize:9,color:"#f87171",letterSpacing:1}}>⚠ offline</div>,
+                unconfigured:  <div style={{fontSize:9,color:"#f87171",letterSpacing:1,cursor:"pointer"}} onClick={()=>setView("setup")}>⚙ setup Firebase</div>,
+              }[syncStatus]}
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:14}}>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:900,color:"#1aff7a",lineHeight:1}}>{checkedIn.length}</div>
+            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>In</div>
+          </div>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:900,color:"#facc15",lineHeight:1}}>{activeCourts}</div>
+            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Courts</div>
+          </div>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:20,fontWeight:900,color:"#f472b6",lineHeight:1}}>{state.matches.length}</div>
+            <div style={{fontSize:9,color:"#475569",letterSpacing:2,textTransform:"uppercase"}}>Games</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Views */}
+      {view === "checkin"     && <ViewCheckin />}
+      {view === "dashboard"   && <ViewDashboard />}
+      {view === "players"     && <ViewPlayers />}
+      {view === "courts"      && <ViewCourts />}
+      {view === "tournament"  && <ViewTournament />}
+      {view === "leaderboard" && <ViewLeaderboard />}
+      {view === "admin"       && <ViewAdmin />}
+      {view === "setup"       && <ViewSetup />}
+
+      {/* ── FLOATING LIVE SCORE TICKER ── visible on all tabs when courts active */}
+      {state.courts.some(c=>c.match) && view !== "courts" && view !== "checkin" && (
+        <div style={{
+          position:"fixed", bottom:"calc(env(safe-area-inset-bottom,0px) + 72px)",
+          left:"50%", transform:"translateX(-50%)",
+          zIndex:49, display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center",
+          pointerEvents:"none", padding:"0 12px",
+        }}>
+          {state.courts.filter(c=>c.match).map(court => {
+            const m = court.match;
+            const sA = m.liveScoreA||0, sB = m.liveScoreB||0;
+            const won = sA>=21||sB>=21;
+            const status = m.status==="paused"?"paused":matchMins(m)>=GAME_DURATION?"overtime":"playing";
+            const col = {playing:"#facc15",overtime:"#f87171",paused:"#a78bfa"}[status];
+            return (
+              <div key={court.id} onClick={()=>setView("courts")}
+                style={{
+                  background:"rgba(7,13,15,0.95)", backdropFilter:"blur(12px)",
+                  border:"1.5px solid "+(won?"#1aff7a":col)+"66",
+                  borderRadius:100, padding:"6px 14px",
+                  display:"flex", alignItems:"center", gap:10,
+                  boxShadow:"0 4px 20px rgba(0,0,0,0.5)",
+                  pointerEvents:"auto", cursor:"pointer",
+                  minWidth:160,
+                }}>
+                <span style={{fontSize:10,fontWeight:700,color:col,letterSpacing:1,textTransform:"uppercase",flexShrink:0}}>
+                  {court.name}
+                </span>
+                <span style={{fontSize:18,fontWeight:900,color:won?"#1aff7a":"#e2e8f0",
+                  fontFamily:"'DM Mono',monospace",letterSpacing:2}}>
+                  {sA} – {sB}
+                </span>
+                {won && <span style={{fontSize:12}}>🏆</span>}
+                {!won && <span style={{fontSize:10,color:"#334155",fontFamily:"'DM Mono',monospace",flexShrink:0}}>
+                  /{21}
+                </span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Bottom Nav */}
+      <nav className="bottom-nav">
+        {navItems.map(n=>(
+          <button key={n.id} className="nav-btn" onClick={()=>setView(n.id)}>
+            <span className="nav-icon">{n.icon}</span>
+            <span className="nav-lbl" style={{color:view===n.id?"#38bdf8":"#334155"}}>{n.label}</span>
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+
+const _root = ReactDOM.createRoot(document.getElementById("root"));
+_root.render(React.createElement(App));
+
+</script>
+</body>
+</html>
